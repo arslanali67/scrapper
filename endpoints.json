@@ -115,7 +115,7 @@
     "price_usd": 0.0245,
     "price_type": "reserves one search credit (~$0.0245) per domain; free if no results",
     "max_cost_usd": 0.03,
-    "params": {"domain": "acme.com", "limit": 3},
-    "note": "Opt-in M5 fallback (--paid-emails) for businesses whose website shows no email. Too expensive as a default."
+    "params": {"domain": "acme.com", "limit": 10},
+    "note": "Opt-in M5 fallback (--paid-emails) for businesses whose website shows no email. Too expensive as a default. One credit covers up to 10 emails, so always ask for 10. Response: data.emails[] with value, type (generic/personal), confidence, position, verification.status."
   }
 }

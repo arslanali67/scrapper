@@ -248,6 +248,63 @@ def test_services_from_menu_links():
     assert crawl_site("")["error"] == "no website"
 
 
+class _ScriptedTreg:
+    """Fake Treg: answers per capability from a dict of functions, records every call."""
+
+    def __init__(self, **answers):
+        self.answers, self.calls = answers, []
+
+    def call(self, capability, params):
+        self.calls.append((capability, params))
+        return self.answers[capability](params)
+
+
+def test_email_status_words():
+    from common import email_status
+    assert email_status({"valid": True, "status": "safe"}) == "valid"
+    assert email_status({"valid": True, "status": "accept_all"}) == "risky"
+    assert email_status({"valid": False, "status": "invalid"}) == "invalid" and email_status(None) == "invalid"
+
+
+def test_enrich_paid_flow():
+    from common import enrich_paid
+    hunter = lambda p: {"data": {"emails": [
+        {"value": "Jane@biz.com", "type": "personal", "confidence": 90, "verification": {"status": None}},
+        {"value": "info@biz.com", "type": "generic", "confidence": 70, "verification": {"status": "valid"}}]}}
+    # Website already had an email: no paid call, even with --paid-emails.
+    t = _ScriptedTreg(company_emails_by_domain=hunter)
+    r = enrich_paid({"emails": ["a@site.com"]}, "site.com", t, paid_emails=True)
+    assert r == {"email": "a@site.com", "all_emails": ["a@site.com"], "email_source": "website", "email_status": ""}
+    assert t.calls == []
+    # Flag off: nothing is bought.
+    assert enrich_paid({"emails": []}, "biz.com", t)["email"] == "" and t.calls == []
+    # Flag on: Hunter once per domain, verified address ranked first, limit 10.
+    cache = {}
+    r = enrich_paid({"emails": []}, "biz.com", t, paid_emails=True, cache=cache)
+    assert r["email"] == "info@biz.com" and r["all_emails"] == ["info@biz.com", "jane@biz.com"] and r["email_source"] == "hunter"
+    assert t.calls == [("company_emails_by_domain", {"domain": "biz.com", "limit": 10})]
+    enrich_paid({"emails": []}, "biz.com", t, paid_emails=True, cache=cache)
+    assert len(t.calls) == 1  # cached
+    # Verify: best bounces, runner-up is valid -> runner-up becomes the email.
+    t = _ScriptedTreg(email_verify=lambda p: {"output": {"valid": p["email"] == "b@site.com", "status": "x"}})
+    r = enrich_paid({"emails": ["a@site.com", "b@site.com", "c@site.com"]}, "site.com", t, verify=True)
+    assert r["email"] == "b@site.com" and r["email_status"] == "valid" and len(t.calls) == 2
+    # Both candidates bounce: no email, but they stay in all_emails.
+    t = _ScriptedTreg(email_verify=lambda p: {"output": {"valid": False, "status": "invalid"}})
+    r = enrich_paid({"emails": ["a@site.com", "b@site.com"]}, "site.com", t, verify=True)
+    assert r["email"] == "" and r["email_status"] == "invalid" and r["all_emails"] == ["a@site.com", "b@site.com"]
+
+
+def test_enrich_paid_failure_not_cached():
+    from common import TregError, enrich_paid
+
+    def boom(p):
+        raise TregError("provider out", 503)
+    t, cache = _ScriptedTreg(company_emails_by_domain=boom), {}
+    assert enrich_paid({"emails": []}, "biz.com", t, paid_emails=True, cache=cache)["email"] == ""
+    assert cache == {}  # a later lead with this domain may try again
+
+
 if __name__ == "__main__":
     tests = [f for name, f in sorted(globals().items()) if name.startswith("test_")]
     for f in tests:

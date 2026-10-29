@@ -564,3 +564,48 @@ def crawl_site(url, region="US", treg=None, client=None):
     finally:
         if own_client:
             client.close()
+
+
+# ---------------------------------------------------------------- paid enrichment (M5)
+def email_status(verify_output):
+    """treg.people.email.verify output -> 'valid' | 'risky' | 'invalid' (providers use their own words)."""
+    o = verify_output or {}
+    word = str(o.get("status") or "").lower()
+    if re.search(r"accept|catch|risky|unknown|role|disposable", word):
+        return "risky"
+    return "valid" if o.get("valid") else "invalid"
+
+
+def enrich_paid(site, domain, treg, paid_emails=False, verify=False, cache=None):
+    """M5: fill the email gap the free website scrape left, and optionally verify the best email.
+    site: crawl_site() result. Returns email, all_emails, email_source, email_status for the lead.
+    TregError skips a step (lead keeps what it has); BudgetReached / OutOfBalance propagate and stop the run."""
+    emails = list(site.get("emails") or [])
+    source = "website" if emails else ""
+    if paid_emails and not emails and domain:
+        cache = {} if cache is None else cache
+        if domain not in cache:  # never pay twice for one domain in a run
+            try:
+                rows = (treg.call("company_emails_by_domain", {"domain": domain, "limit": 10}).get("data") or {}) \
+                    .get("emails") or []
+            except TregError:
+                rows = None  # not cached: a later lead with the same domain may retry
+            if rows is not None:
+                rows.sort(key=lambda e: ((e.get("verification") or {}).get("status") != "valid", -(e.get("confidence") or 0)))
+                cache[domain] = [e["value"].lower() for e in rows if e.get("value")]
+        emails = cache.get(domain) or []
+        source = "hunter" if emails else ""
+    status, best = "", emails[0] if emails else ""
+    if verify and emails:
+        for candidate in emails[:2]:  # verify the best; if it is invalid, try the runner-up once
+            try:
+                status = email_status(treg.call("email_verify", {"email": candidate}).get("output"))
+            except TregError:
+                status = ""
+                break
+            if status != "invalid":
+                best = candidate
+                break
+        else:
+            best = ""  # every verified candidate bounced: keep them in all_emails only
+    return {"email": best, "all_emails": emails, "email_source": source, "email_status": status}

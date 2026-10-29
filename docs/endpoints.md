@@ -44,8 +44,12 @@ Chosen IDs, caps and example params are in [`endpoints.json`](../endpoints.json)
 5. **M5:** the paid domain search (hunter) is opt-in, not automatic.
 6. **M12 company mode:** discovery via `treg.companies.search`.
 
+## Measured later
+
+- **M4 website scrape** (20 Austin dentists, 2026-10-29): 18 sites readable (2 behind a bot check, skipped), email on **10/18**, phone and address on 18/18, $0.
+- **M5 Hunter domain search** on the 8 readable sites with no website email (2026-10-30): emails for **3/8**, all verified valid. $0.0245 per domain with results, $0 for the 5 unknown domains; verification added $0-$0.00124. With `--paid-emails` email coverage rises to **13/18 (72%)**, at about $0.025 per extra email found.
+
 ## Not measured yet
 
 - Per-query depth limit of the X-ray search beyond one query (76 rows at limit 100).
 - Phone-find hit rate (1 sample).
-- Email hit rate for M4's full crawler (pending M4; 40% is the naive baseline).

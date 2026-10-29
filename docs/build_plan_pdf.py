@@ -215,7 +215,7 @@ MODULES = [
               "with no junk emails."),
 
     dict(id="M5", title="Paid Enrichment (Email Finder, Verify, Phone)", tag="PHASE 1 \u00b7 P0/P1", pri="P0/P1",
-         state="Does not exist",
+         state="Done (Oct 30): Hunter 3/8 found, coverage 13/18",
          goal="Fill the email gap that M4 leaves, using paid finders only when the free crawl found nothing, and "
               "optionally verify emails before they go into the CSV.",
          used_by="Both scrapers",
@@ -223,7 +223,7 @@ MODULES = [
                "Optional email verification with --verify (P1).",
                "Record the source of every email."],
          how=[f"With {c('--paid-emails')} (off by default), if {c('enrich_website')} returned no email and the lead has a "
-              f"domain, call {c('hunter.companies.emails')} with {c('domain=acme.com&amp;limit=3')}. Set {c('email_source')} "
+              f"domain, call {c('hunter.companies.emails')} with {c('domain=acme.com&amp;limit=10')} (one credit covers up to 10 emails). Set {c('email_source')} "
               "to hunter.",
               "It reserves about $0.0245 per domain (free when nothing is found), which is why it is opt-in; its cap in "
               f"endpoints.json is {c('0.03')}.",
