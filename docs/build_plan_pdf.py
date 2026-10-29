@@ -177,7 +177,7 @@ MODULES = [
          done="Writing, killing and re-running produces no duplicate rows; the file opens cleanly in Excel."),
 
     dict(id="M4", title="Website Deep Scrape (Full Details)", tag="PHASE 1 · P0", pri="P0",
-         state="Does not exist",
+         state="Done (Oct 29): 18/18 reachable sites read, email 10/18",
          goal="Visit every business website and collect everything useful on it: contact details (emails, phones, "
               "socials) plus what the company is and does (description, services, team, address, hours, contact form). "
               "This is free and runs before any paid lookup; LinkedIn and Google listings almost never show an email.",
@@ -205,8 +205,9 @@ MODULES = [
               f"{c('team_members')} as &quot;Name - Title&quot; pairs from the team page where they can be detected; "
               f"{c('contact_form_url')} = first page with a form that has an email field; {c('site_address')} from "
               "JSON-LD or the contact page.",
-              "If the homepage HTML has almost no text (a JavaScript app) and nothing was found, fetch the pages once "
-              "through the page-extract capability via call() (paid, small).",
+              "If the homepage loads but has almost no text (a JavaScript app) and nothing was found, render it once "
+              "through the page-extract capability via call() (paid, small). Sites that answer with a bot check "
+              "(403 / challenge page) are skipped and reported, never worked around.",
               f"Run sites in a {c('ThreadPoolExecutor(max_workers=8)')}; set {c('email_source=&quot;website&quot;')}."],
          files="common.py (crawl_site, extract_contacts, extract_details)",
          deps="none new (httpx, phonenumbers, stdlib re / json / html.parser / urllib.robotparser)",
