@@ -150,6 +150,104 @@ def test_shared_columns_first():
         assert cols[:12] == SHARED_COLUMNS and len(cols) == len(set(cols))
 
 
+def _cf(email, key=0x42):
+    return f"{key:02x}" + "".join(f"{ord(ch) ^ key:02x}" for ch in email)
+
+
+FAKE_SITE = {
+    "/robots.txt": "User-agent: *\nDisallow: /private",
+    "/": """<html><head><meta name="description" content="Family dentist in Austin.">
+        <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"Dentist",
+        "telephone":"(512) 474-1234","address":{"streetAddress":"1700 S 1st St","addressLocality":"Austin",
+        "addressRegion":"TX","postalCode":"78704"},"sameAs":["https://www.linkedin.com/company/acme-dental"]}]}</script>
+        <script>var x = "ignored@script.com";</script></head><body>
+        <a href="/contact-us">Contact</a> <a href="/about">About us</a> <a href="/our-team">Meet the team</a>
+        <a href="/services">Services</a> <a href="/private/contact">Secret</a> <a href="/logo.pdf">Brochure</a>
+        <a href="/terms-of-service">Terms of Service</a>
+        <a href="https://www.facebook.com/sharer.php?u=x">Share</a> <a href="https://www.facebook.com/acmedental/">FB</a>
+        <a href="https://instagram.com/acme.dental">IG</a><img src="logo@2x.png"><p>id 1a2b3c4d5e6f7a8b9c0d1e2f@sentry.io</p>
+        </body></html>""",
+    "/contact-us": f"""<p>Email <a href="mailto:info@acme-dental.com?subject=Hi">us</a> or
+        <a href="/cdn-cgi/l/email-protection#{_cf('dr.smith@acme-dental.com')}">[email protected]</a>,
+        billing [at] acme-dental [dot] com, or our old acme.dental@gmail.com.</p>
+        <p>Call <a href="tel:+15124741234">512-474-1234</a> or (512) 474-9999.</p>
+        <form><input type="email" name="your-email"></form>""",
+    "/about": "<p>Short.</p><p>" + "We have cared for Austin families since 1998 with gentle, modern dentistry. " * 2 + "</p>",
+    "/our-team": "<h3>Meet Our Team</h3><p>Office Manager</p><h3>Dr. Jane Smith, DDS</h3><p>Lead Dentist</p>"
+                 "<h3>John Doe</h3><p>Dental Hygienist</p><h3>Book Today</h3><p>MEET THE DOCTOR</p>",
+    "/services": "<h2>Teeth Whitening</h2><h2>Dental Implants</h2><h2>Contact Us Today</h2><h3>What to expect</h3>"
+                 "<h3>45 mins or longer</h3>",
+    "/terms-of-service": "<h2>Limitation of Liability</h2>",
+    "/private/contact": "<a href='mailto:secret@acme-dental.com'>x</a>",
+}
+
+
+def _site_client(pages, seen):
+    def handler(req):
+        seen.append(req.url.path)
+        body = pages.get(req.url.path)
+        if isinstance(body, int):  # a status code, e.g. 403 from a bot wall
+            return httpx.Response(body, text="Just a moment...")
+        return httpx.Response(200, text=body, headers={"content-type": "text/html"}) if body else httpx.Response(404)
+    return httpx.Client(transport=httpx.MockTransport(handler), base_url="https://acme-dental.com")
+
+
+def test_crawl_site_extracts_everything():
+    from common import crawl_site
+    seen = []
+    r = crawl_site("https://acme-dental.com", client=_site_client(FAKE_SITE, seen))
+    assert r["error"] == "" and r["pages_crawled"] == 5, r
+    assert r["emails"] == ["dr.smith@acme-dental.com", "info@acme-dental.com", "billing@acme-dental.com"], r["emails"]
+    assert r["email"] == "dr.smith@acme-dental.com"
+    assert r["phones"] == ["+1 512-474-1234", "+1 512-474-9999"], r["phones"]
+    assert r["facebook"] == "https://www.facebook.com/acmedental" and r["instagram"] == "https://instagram.com/acme.dental"
+    assert r["linkedin"] == "https://www.linkedin.com/company/acme-dental"
+    assert r["site_description"] == "Family dentist in Austin."
+    assert r["services"] == ["Teeth Whitening", "Dental Implants"], r["services"]
+    assert r["team_members"] == ["Dr. Jane Smith, DDS - Lead Dentist", "John Doe - Dental Hygienist"], r["team_members"]
+    assert r["contact_form_url"].endswith("/contact-us") and r["site_address"] == "1700 S 1st St, Austin, TX, 78704"
+    assert "/private/contact" not in seen and "/logo.pdf" not in seen  # robots.txt and file links respected
+    assert "/terms-of-service" not in seen  # "service" in a terms URL is not a services page
+
+
+def test_crawl_site_js_fallback_and_errors():
+    from common import crawl_site
+
+    class FakeTreg:
+        def call(self, capability, params):
+            assert capability == "web_extract"
+            return {"output": {"pages": [{"markdown": "Write to hi@jsdental.com\n[Facebook](https://facebook.com/jsdental)"}]}}
+    r = crawl_site("jsdental.com", treg=FakeTreg(), client=_site_client({"/": "<div id='app'></div>"}, []))
+    assert r["js_fallback"] and r["email"] == "hi@jsdental.com" and r["facebook"] == "https://facebook.com/jsdental", r
+
+    class NeverTreg:  # a bot check is respected: treg must not be used to get past it
+        def call(self, capability, params):
+            raise AssertionError("treg called for a site that blocks bots")
+    for wall in ({"/": 403}, {"/": "<html><head><title>Just a moment...</title></head><body></body></html>"}):
+        r = crawl_site("https://walled.com", treg=NeverTreg(), client=_site_client(wall, []))
+        assert r["error"] == "homepage blocked (bot check)", r
+
+
+def test_jsonld_with_control_chars_and_broken_json():
+    from common import crawl_site
+    home = ('<script type="application/ld+json">{"@type":"Dentist","description":"line one\nline two",'
+            '"email":"front@ctrl.com","telephone":"512-474-1234"}</script>'
+            '<script type="application/ld+json">{"email":"x2@ctrl.com", broken</script>')
+    r = crawl_site("https://ctrl.com", client=_site_client({"/": home}, []))
+    assert set(r["emails"]) == {"x2@ctrl.com", "front@ctrl.com"} and r["phones"] == ["+1 512-474-1234"], r
+
+
+def test_services_from_menu_links():
+    from common import crawl_site
+    home = ("<a href='/services/implants/'>Implants</a><a href='/services/veneers/'>Veneers</a>"
+            "<a href='/services/crowns/'>Crowns</a><a href='/services/expect/'>What to expect</a>"
+            "<a href='/services/'>Services</a>")
+    r = crawl_site("https://menu.com", client=_site_client({"/": home, "/services/": "<h2>Other Heading</h2>"}, []))
+    assert r["services"] == ["Implants", "Veneers", "Crowns"], r["services"]
+    assert crawl_site("https://down.example", client=_site_client({}, []))["error"]
+    assert crawl_site("")["error"] == "no website"
+
+
 if __name__ == "__main__":
     tests = [f for name, f in sorted(globals().items()) if name.startswith("test_")]
     for f in tests:
