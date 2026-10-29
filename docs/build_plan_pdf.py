@@ -122,7 +122,7 @@ MODULES = [
                 ["Email verify / phone find", "M5, M11", "treg.people.email.verify, treg.people.phone.find"]]),
 
     dict(id="M2", title="treg Client & Cost Control", tag="PHASE 1 \u00b7 P0", pri="P0",
-         state="Does not exist",
+         state="Done (Oct 29): common.py Treg + offline checks",
          goal="One function that is the only way any scraper talks to treg. It adds the token, retries, logs every call, "
               "and stops the run before it spends more than the user allowed.",
          used_by="Every module that calls treg (M4-M12)",
@@ -153,7 +153,7 @@ MODULES = [
          done="A test call through call() returns JSON, cost is logged, and --max-cost 0 stops before any spend."),
 
     dict(id="M3", title="Lead Model, CSV Output & Resume", tag="PHASE 1 \u00b7 P0", pri="P0",
-         state="Does not exist",
+         state="Done (Oct 29): LeadWriter, columns, Excel-checked",
          goal="Fix the CSV columns once and write leads safely: row by row, de-duplicated, resumable and Excel-friendly. "
               "Both scrapers share the first 12 columns so their files can be stacked later.",
          used_by="Both scrapers",
@@ -164,13 +164,14 @@ MODULES = [
          how=[f"Shared columns, in order: {c('company_name, website, domain, email, all_emails, email_source, phone, all_phones, address, city, country, source_url')}.",
               f"LinkedIn people extras (people mode): {c('full_name, first_name, last_name, job_title, headline, person_location, person_linkedin_url, company_linkedin_url, industry, company_size, email_status, email_confidence, search_query, scraped_at, cost_usd')}.",
               f"LinkedIn company extras (company mode): {c('linkedin_id, tagline, description, industry, company_size, employees_on_linkedin, headquarters, all_locations, founded_year, company_type, specialties, followers, logo_url, funding_info, socials, email_status, scraped_at, cost_usd')}.",
-              f"Google extras: {c('place_id, category, all_categories, state, postal_code, latitude, longitude, rating, review_count, price_level, opening_hours, business_status, google_maps_url, facebook, instagram, linkedin, x, youtube, site_description, services, team_members, contact_form_url, site_address, search_query, search_location, email_status, scraped_at, cost_usd')}.",
+              f"Google extras: {c('place_id, category, all_categories, state, postal_code, latitude, longitude, rating, review_count, opening_hours, google_maps_url, facebook, instagram, linkedin, x, youtube, tiktok, site_description, services, team_members, contact_form_url, site_address, search_query, search_location, email_status, scraped_at, cost_usd')}.",
               f"Use stdlib {c('csv.DictWriter')} with encoding {c('utf-8-sig')} (Excel opens it correctly), "
               f"{c('extrasaction=&quot;ignore&quot;')}, and {c('flush()')} after every row so a crash loses at most one lead.",
               f"Resume: on start, if the output file exists, read its dedupe key column ({c('place_id')} or "
               f"{c('person_linkedin_url')} or {c('source_url')}) into a set and skip those leads before any paid call.",
               f"Multi-value fields are joined with {c('&quot; | &quot;')}. Empty stays empty (never &quot;N/A&quot;). Domains are "
-              f"lower-case without {c('www.')}. Phones go to E.164 with {c('phonenumbers')} using the lead's country."],
+              f"lower-case without {c('www.')}. Phones go to international format ({c('+1 512-474-1234')}) with {c('phonenumbers')}: Excel shows bare E.164 "
+              "as 1.51E+10 (checked in M3)."],
          files="common.py (LeadWriter, normalize_phone, domain_of) \u00b7 columns defined at top of each scraper file",
          deps="phonenumbers",
          done="Writing, killing and re-running produces no duplicate rows; the file opens cleanly in Excel."),
@@ -245,7 +246,7 @@ MODULES = [
                "Detect when a cell hits the result cap, so M8 can split it.",
                "No place-details call: search rows are already complete (M1: 100/100).",
                "Map provider JSON to the Google CSV columns.",
-               "Filters: minimum rating, minimum reviews, skip closed, website required."],
+               "Filters: minimum rating, minimum reviews, website required."],
          how=[f"Call {c('crawl4ai.google.serp.maps')} with {c('query')}, {c('location')} = the cell and {c('limit')} 100: one "
               "call returns up to 100 places for $0.00015.",
               "Count the results. If the count reaches the provider's cap (100, measured in M1), mark the cell "
@@ -253,7 +254,7 @@ MODULES = [
               f"De-duplicate by {c('place_id')} across the whole run; fallback key = normalized phone + domain.",
               "No details call: in M1 every row already had website, phone, address, hours, rating and place_id.",
               f"Write one function {c('map_place(raw) -&gt; dict')}; a vendor change only touches it and endpoints.json.",
-              f"Apply {c('--min-rating')}, {c('--min-reviews')}, skip {c('CLOSED_PERMANENTLY')}, and with "
+              f"Apply {c('--min-rating')}, {c('--min-reviews')}, and with "
               f"{c('--require-website')} keep only businesses that have a website. Filters run before the website scrape, "
               "so filtered leads cost nothing more.",
               f"Set {c('source_url')} = Google Maps URL, {c('search_query')} and {c('search_location')} on every row."],
@@ -466,7 +467,7 @@ MODULES = [
                "Acceptance runs against real treg endpoints.",
                "README with setup and examples."],
          how=[f"{c('test_common.py')} (plain asserts): email extraction incl. Cloudflare and [at] forms, junk filtering, "
-              "JSON-LD parsing, phone E.164, profile and company URL normalization, LinkedIn result-title parsing, X-ray "
+              "JSON-LD parsing, phone format, profile and company URL normalization, LinkedIn result-title parsing, X-ray "
               "query length, state -&gt; cities planning, resume skips existing keys, budget stop.",
               "G-A1: &quot;dentists&quot; / &quot;Austin, TX&quot; / --limit 50 gives 50 unique rows; phone 90%+, website 80%+, "
               "email at or above the rate measured in M1, description filled for most sites. "

@@ -1,11 +1,14 @@
 """Shared code for both scrapers. The Treg class is the only way any scraper talks to treg."""
+import csv
 import json
 import os
+import re
 import time
 from datetime import datetime
 from pathlib import Path
 
 import httpx
+import phonenumbers
 
 ROOT = Path(__file__).parent
 ENDPOINTS = json.loads((ROOT / "endpoints.json").read_text(encoding="utf-8"))
@@ -111,3 +114,104 @@ class Treg:
 def estimate(calls):
     """Dry-run cost in USD: {capability: expected number of calls} x price_usd from endpoints.json."""
     return sum(ENDPOINTS[cap]["price_usd"] * n for cap, n in calls.items())
+
+
+# ---------------------------------------------------------------- lead CSV (M3)
+# The first 12 columns are identical in every CSV so files from both scrapers can be stacked.
+SHARED_COLUMNS = ["company_name", "website", "domain", "email", "all_emails", "email_source", "phone", "all_phones",
+                  "address", "city", "country", "source_url"]
+GOOGLE_COLUMNS = SHARED_COLUMNS + [
+    "place_id", "category", "all_categories", "state", "postal_code", "latitude", "longitude", "rating",
+    "review_count", "opening_hours", "google_maps_url", "facebook", "instagram", "linkedin", "x", "youtube", "tiktok",
+    "site_description", "services", "team_members", "contact_form_url", "site_address", "search_query",
+    "search_location", "email_status", "scraped_at", "cost_usd"]
+PEOPLE_COLUMNS = SHARED_COLUMNS + [
+    "full_name", "first_name", "last_name", "job_title", "headline", "person_location", "person_linkedin_url",
+    "company_linkedin_url", "industry", "company_size", "email_status", "email_confidence", "search_query",
+    "scraped_at", "cost_usd"]
+COMPANY_COLUMNS = SHARED_COLUMNS + [
+    "linkedin_id", "tagline", "description", "industry", "company_size", "employees_on_linkedin", "headquarters",
+    "all_locations", "founded_year", "company_type", "specialties", "followers", "logo_url", "funding_info",
+    "socials", "email_status", "scraped_at", "cost_usd"]
+
+_NUMERIC = re.compile(r"^[+-]?[\d .()/-]+$")
+
+
+def cell(value):
+    """One CSV cell: lists joined with ' | ' (deduped, order kept), None -> '', formula-looking text defused."""
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple, set)):
+        value = " | ".join(dict.fromkeys(str(v).strip() for v in value if v not in (None, "")))
+    value = str(value).strip()
+    # Scraped text that starts with = + - @ would run as a formula in Excel; phone numbers and plain numbers are fine.
+    if value[:1] in ("=", "+", "-", "@") and not _NUMERIC.match(value):
+        value = "'" + value
+    return value
+
+
+def domain_of(url_or_email):
+    """'https://www.Acme.com/about' or 'jo@acme.com' -> 'acme.com'; '' when there is nothing usable."""
+    s = (url_or_email or "").strip().lower()
+    if "@" in s and "/" not in s:
+        s = s.rsplit("@", 1)[1]
+    s = re.sub(r"^[a-z][a-z0-9+.-]*://", "", s).split("/")[0].split("?")[0].split(":")[0]
+    s = s.removeprefix("www.")
+    return s if "." in s else ""
+
+
+def normalize_phone(raw, region="US"):
+    """Any phone text -> international format ('+1 512-474-1234'), or '' when it is not a valid number.
+    Not bare E.164: Excel turns '+15124741234' into the number 1.51E+10, but keeps this format as text."""
+    try:
+        n = phonenumbers.parse(str(raw or ""), region)
+    except phonenumbers.NumberParseException:
+        return ""
+    if not phonenumbers.is_valid_number(n):
+        return ""
+    return phonenumbers.format_number(n, phonenumbers.PhoneNumberFormat.INTERNATIONAL)
+
+
+class LeadWriter:
+    """Appends one lead per row and flushes each row, so a crash loses at most the lead in progress.
+    Resume: keys already in an existing file are loaded so callers can skip them before any paid call."""
+
+    def __init__(self, path, columns, key):
+        self.path, self.columns, self.key = Path(path), columns, key
+        self.seen = set()
+        if self.path.exists() and self.path.stat().st_size:
+            with open(self.path, newline="", encoding="utf-8-sig") as f:
+                reader = csv.DictReader(f)
+                if reader.fieldnames != columns:
+                    raise SystemExit(f"{self.path} has different columns; choose another --out file")
+                self.seen = {row[key] for row in reader if row.get(key)}
+            self.file = open(self.path, "a", newline="", encoding="utf-8")  # no second BOM mid-file
+            self.writer = csv.DictWriter(self.file, columns, extrasaction="ignore")
+        else:
+            self.file = open(self.path, "w", newline="", encoding="utf-8-sig")  # BOM so Excel reads UTF-8
+            self.writer = csv.DictWriter(self.file, columns, extrasaction="ignore")
+            self.writer.writeheader()
+
+    def has(self, key_value):
+        return cell(key_value) in self.seen
+
+    def write(self, lead):
+        """Write one lead dict. Returns False (and writes nothing) when its key is already in the file."""
+        row = {c: cell(lead.get(c)) for c in self.columns}
+        if not row[self.key]:
+            raise ValueError(f"lead has no {self.key}")
+        if row[self.key] in self.seen:
+            return False
+        self.writer.writerow(row)
+        self.file.flush()
+        self.seen.add(row[self.key])
+        return True
+
+    def close(self):
+        self.file.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
