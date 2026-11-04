@@ -290,7 +290,7 @@ MODULES = [
          done="Acceptance tests G-A1 to G-A4 in M15 pass."),
 
     dict(id="M8", title="Area Coverage (State -&gt; Cities -&gt; ZIP Codes)", tag="PHASE 2 · P0", pri="P0",
-         state="Does not exist",
+         state="Done (Nov 4): Texas 1,000 unique; Vermont 3.8x vs one search",
          goal="Get as close as possible to every matching business in a large area. One Maps search returns at most "
               "100 places (M1), so a state is searched city by city, and any city that hits the cap is searched "
               "again ZIP code by ZIP code.",

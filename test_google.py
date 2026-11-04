@@ -141,6 +141,63 @@ def test_budget_stop_keeps_finished_leads_and_resume_skips_them():
     gs.WORKERS = 8
 
 
+def test_plan_area():
+    cells, st = gs.plan_area("Texas")
+    assert st == "TX" and cells[0]["cell"] == "Houston, TX" and len(cells) == 391 and gs.plan_area("tx")[0] == cells
+    assert all(c["kind"] == "city" for c in cells) and len(gs.plan_area("Texas", min_population=100000)[0]) < 50
+    assert gs.plan_area("Texas", split="none")[0] == [{"cell": "Texas", "kind": "state", "city": "", "state": "TX"}]
+    assert gs.plan_area("Austin, TX") == gs.plan_area("Austin, Texas") == \
+        ([{"cell": "Austin, TX", "kind": "city", "city": "Austin", "state": "TX"}], "TX")
+    zips, st = gs.plan_area("Austin, TX", split="zips")
+    assert st == "TX" and len(zips) == 74 and zips[0]["kind"] == "zip" and zips[0]["cell"].endswith(", TX")
+    assert gs.plan_area("78704") == ([{"cell": "78704, TX", "kind": "zip", "city": "", "state": "TX"}], "TX")
+    assert gs.plan_area("London, UK") == ([{"cell": "London, UK", "kind": "free", "city": "", "state": ""}], None)
+    f = Path(tempfile.mkdtemp()) / "areas.txt"
+    f.write_text("Leeds, UK\n# comment\n\nBristol, UK\n", encoding="utf-8")
+    assert [c["cell"] for c in gs.plan_area(locations_file=f)[0]] == ["Leeds, UK", "Bristol, UK"]
+
+
+class AreaTreg(FakeTreg):
+    """Maps search answer depends on the searched cell."""
+
+    def __init__(self, answer):
+        super().__init__([])
+        self.answer = answer
+
+    def call(self, capability, params, tally=None):
+        super().call(capability, params, tally)
+        return {"rows": self.answer(params["location"])}
+
+
+def biz(tag, n, address="1 Main St, Austin, TX 78704"):
+    return [{**RAW, "place_id": f"{tag}-{i}", "name": f"{tag} {i}", "address": address} for i in range(n)]
+
+
+def test_full_city_is_researched_by_zip_and_other_states_dropped():
+    def answer(cell):
+        if cell == "Austin, TX":
+            return biz("city", 100)  # hits the cap -> 74 ZIP searches follow
+        return biz(cell, 2) + biz("dup", 1) + biz("nm", 1, "9 Elm St, Santa Fe, NM 87501")
+    t = AreaTreg(answer)
+    gs.Treg = lambda max_cost: t
+    out = Path(tempfile.mkdtemp()) / "g.csv"
+    gs.main(["--query", "dentists", "--location", "Austin, TX", "--limit", "1000", "--no-enrich", "--out", str(out)])
+    rows = read(out)
+    zip_searches = [p["location"] for c, p in t.calls if p["location"] != "Austin, TX"]
+    assert len(zip_searches) == 74 and all(z.endswith(", TX") for z in zip_searches)
+    assert len(rows) == 100 + 74 * 2 + 1 and len({r["place_id"] for r in rows}) == len(rows)  # dup counted once
+    assert not any(r["state"] == "NM" for r in rows)
+
+
+def test_search_stops_once_limit_is_reached():
+    t = AreaTreg(lambda cell: biz(cell, 100))
+    gs.Treg = lambda max_cost: t
+    out = Path(tempfile.mkdtemp()) / "g.csv"
+    gs.main(["--query", "dentists", "--location", "Texas", "--limit", "150", "--no-enrich", "--out", str(out)])
+    assert len(read(out)) == 150
+    assert len(t.calls) <= 2 * gs.SEARCH_WORKERS, len(t.calls)  # not 391 searches + their ZIP codes
+
+
 if __name__ == "__main__":
     tests = [f for name, f in sorted(globals().items()) if name.startswith("test_")]
     for f in tests:

@@ -49,6 +49,10 @@ Chosen IDs, caps and example params are in [`endpoints.json`](../endpoints.json)
 - **M4 website scrape** (20 Austin dentists, 2026-10-29): 18 sites readable (2 behind a bot check, skipped), email on **10/18**, phone and address on 18/18, $0.
 - **M5 Hunter domain search** on the 8 readable sites with no website email (2026-10-30): emails for **3/8**, all verified valid. $0.0245 per domain with results, $0 for the 5 unknown domains; verification added $0-$0.00124. With `--paid-emails` email coverage rises to **13/18 (72%)**, at about $0.025 per extra email found.
 
+- **M8 area coverage** (2026-11-04, Maps data only): "dentists" in Texas, limit 1,000 -> 1,000 unique places from 28
+  searches (4 cities, all full, re-searched by 24 ZIP codes) in 36 s for $0.0042. Vermont: one statewide search
+  stops at 100; the city split found **377** (3.8x) from 22 searches for $0.0033, dropping 52 from other states.
+
 ## Not measured yet
 
 - Per-query depth limit of the X-ray search beyond one query (76 rows at limit 100).

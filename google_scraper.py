@@ -1,20 +1,24 @@
 """Google scraper: businesses from Google Maps for a query + area, enriched from their websites, written to a lead CSV.
 
   python google_scraper.py --query "dentists" --location "Austin, TX" --limit 300
-  python google_scraper.py --query "IT companies" --location "Austin, TX" --require-website --paid-emails --dry-run
+  python google_scraper.py --query "IT companies" --location "Texas" --require-website --max-cost 25
+  python google_scraper.py --query "plumbers" --locations-file areas.txt --dry-run
 
-M6 search + mapping, M7 enrichment / dry-run / resume / summary. M8 adds state -> cities -> ZIP coverage.
+A state is searched city by city (largest first); a city whose search hits the 100-result cap is searched again
+ZIP code by ZIP code. M6 search + mapping, M7 enrichment / dry-run / resume / summary, M8 area coverage.
 """
 import argparse
+import csv
 import re
 import sys
-from collections import Counter
-from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
+from collections import Counter, deque
+from concurrent.futures import FIRST_COMPLETED, CancelledError, ThreadPoolExecutor, wait
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 
-from common import (ENDPOINTS, GOOGLE_COLUMNS, BudgetReached, LeadSpend, LeadWriter, OutOfBalance, Treg, TregError,
-                    crawl_site, domain_of, enrich_paid, estimate, normalize_phone)
+from common import (ENDPOINTS, GOOGLE_COLUMNS, ROOT, BudgetReached, LeadSpend, LeadWriter, OutOfBalance, Treg,
+                    TregError, crawl_site, domain_of, enrich_paid, estimate, normalize_phone)
 
 ROWS_CAP = ENDPOINTS["maps_search"]["rows_cap"]  # one search never returns more (M1): a full cell is "saturated"
 # "..., Austin, TX 78704" or "..., Austin, TX 78704, United States"
@@ -27,8 +31,78 @@ SHARE_NO_EMAIL = 0.45     # readable sites without an email (8/18)
 SHARE_HUNTER_HIT = 0.40   # of those, domains Hunter knows and bills for (3/8)
 SHARE_EMAIL = 0.70        # leads with an email to verify (13/18 with --paid-emails)
 WORKERS = 8               # websites scraped in parallel
+SEARCH_WORKERS = 4        # Maps searches in parallel (each takes ~30 s)
+SECONDS_PER_SEARCH = 35   # for the dry-run time estimate
 
 
+# ---------------------------------------------------------------- area planning (M8)
+def _rows(name):
+    with open(ROOT / "data" / name, newline="", encoding="utf-8") as f:
+        return list(csv.DictReader(f))
+
+
+@lru_cache(None)
+def states():
+    """{'TX': 'Texas', ...} from data/us_states.csv (GeoNames)."""
+    return {r["code"]: r["name"] for r in _rows("us_states.csv")}
+
+
+def state_code(text):
+    """'TX', 'tx' or 'Texas' -> 'TX'; None if it is not a US state."""
+    t = (text or "").strip()
+    return t.upper() if t.upper() in states() else next((c for c, n in states().items() if n.lower() == t.lower()), None)
+
+
+@lru_cache(None)
+def _cities_by_state():
+    out = {}
+    for r in _rows("us_cities.csv"):  # already sorted by state, largest first
+        out.setdefault(r["state"], []).append((r["city"], int(r["population"])))
+    return out
+
+
+@lru_cache(None)
+def _zips_by_city():
+    out = {}
+    for r in _rows("us_zips.csv"):
+        out.setdefault((r["city"].lower(), r["state"]), []).append(r["zip"])
+        out.setdefault(("", r["state"]), []).append(r["zip"])  # every ZIP of the state
+        out[("#", r["zip"])] = [r["state"]]
+    return out
+
+
+def zips_of(city, state):
+    return _zips_by_city().get(((city or "").lower(), state), [])
+
+
+def plan_area(location=None, split="auto", min_population=5000, locations_file=None):
+    """-> (cells, state). A cell is {'cell': text for the Maps search, 'kind': city|zip|state|free, 'city', 'state'}.
+    state: the requested US state (places outside it are dropped), or None."""
+    if locations_file:
+        lines = [l.strip() for l in Path(locations_file).read_text(encoding="utf-8").splitlines()]
+        return [{"cell": l, "kind": "free", "city": "", "state": ""} for l in lines if l and not l.startswith("#")], None
+    s = location.strip()
+    st = state_code(s)
+    if st:
+        if split == "none":
+            return [{"cell": states()[st], "kind": "state", "city": "", "state": st}], st
+        if split == "zips":
+            return [{"cell": f"{z}, {st}", "kind": "zip", "city": "", "state": st} for z in zips_of("", st)], st
+        return [{"cell": f"{c}, {st}", "kind": "city", "city": c, "state": st}
+                for c, pop in _cities_by_state().get(st, []) if pop >= min_population], st
+    if re.fullmatch(r"\d{5}", s):
+        st = (_zips_by_city().get(("#", s)) or [""])[0]
+        return [{"cell": f"{s}, {st}" if st else s, "kind": "zip", "city": "", "state": st}], st or None
+    m = re.fullmatch(r"(.+?),\s*([A-Za-z .]+)", s)
+    if m and state_code(m.group(2)):
+        city, st = m.group(1).strip(), state_code(m.group(2))
+        if split == "zips" and zips_of(city, st):
+            return [{"cell": f"{z}, {st}", "kind": "zip", "city": city, "state": st} for z in zips_of(city, st)], st
+        return [{"cell": f"{city}, {st}", "kind": "city", "city": city, "state": st}], st
+    return [{"cell": s, "kind": "free", "city": "", "state": ""}], None
+
+
+# ---------------------------------------------------------------- one search cell + mapping (M6)
 def search_cell(treg, query, cell):
     """One Maps search: returns (rows, saturated). Saturated = the provider's cap was hit, more places likely exist."""
     rows = treg.call("maps_search", {"query": query, "location": cell, "limit": ROWS_CAP}).get("rows") or []
@@ -64,6 +138,7 @@ def passes(lead, min_rating=0.0, min_reviews=0, require_website=False):
             and bool(lead.get("website") or not require_website))
 
 
+# ---------------------------------------------------------------- enrichment (M7)
 def enrich(lead, treg, paid_emails, verify, cache):
     """M4 website scrape + M5 paid email/verify for one lead. Returns (lead, website_error, micro_usd_spent)."""
     spend = LeadSpend(treg)
@@ -75,19 +150,26 @@ def enrich(lead, treg, paid_emails, verify, cache):
     return lead, site.get("error", ""), spend.micro
 
 
-def dry_run_cost(leads, cells, paid_emails, verify):
-    calls = {"maps_search": cells, "web_extract": leads * SHARE_JS_SITE}
-    if paid_emails:
-        calls["company_emails_by_domain"] = leads * SHARE_NO_EMAIL * SHARE_HUNTER_HIT
-    if verify:
-        calls["email_verify"] = leads * SHARE_EMAIL
+def dry_run_cost(leads, cells, paid_emails, verify, no_enrich=False):
+    calls = {"maps_search": cells}
+    if not no_enrich:
+        calls["web_extract"] = leads * SHARE_JS_SITE
+        if paid_emails:
+            calls["company_emails_by_domain"] = leads * SHARE_NO_EMAIL * SHARE_HUNTER_HIT
+        if verify:
+            calls["email_verify"] = leads * SHARE_EMAIL
     return estimate(calls)
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Google Maps businesses -> lead CSV with emails, phones and site details")
     ap.add_argument("--query", required=True, help='business type, e.g. "dentists"')
-    ap.add_argument("--location", required=True, help='one city or ZIP, e.g. "Austin, TX"')
+    where = ap.add_mutually_exclusive_group(required=True)
+    where.add_argument("--location", help='a state ("Texas"), a city ("Austin, TX") or a ZIP ("78704")')
+    where.add_argument("--locations-file", help="one location per line (any country), searched as given")
+    ap.add_argument("--split", choices=("auto", "none", "cities", "zips"), default="auto",
+                    help="auto: a state -> its cities, full cities -> ZIP codes (default); none: one search as given")
+    ap.add_argument("--min-population", type=int, default=5000, help="smallest city searched when splitting a state")
     ap.add_argument("--limit", type=int, default=100, help="total leads wanted in the output file")
     ap.add_argument("--out", default="leads_google.csv")
     ap.add_argument("--max-cost", type=float, default=5.0, help="hard spend limit in USD for this run")
@@ -103,86 +185,142 @@ def main(argv=None):
     if a.no_enrich and (a.paid_emails or a.verify):
         ap.error("--no-enrich cannot be combined with --paid-emails or --verify")
 
-    leads_expected, cells = min(a.limit, ROWS_CAP), 1
+    cells, area_state = plan_area(a.location, a.split, a.min_population, a.locations_file)
+    if not cells:
+        sys.exit("no search areas: check --location / --min-population / --locations-file")
     if a.dry_run:
-        cost = estimate({"maps_search": cells}) if a.no_enrich else dry_run_cost(leads_expected, cells, a.paid_emails, a.verify)
-        print(f"dry run: {cells} Maps search(es), up to {leads_expected} leads -> estimated ${cost:.4f} "
-              f"(hard limit --max-cost ${a.max_cost:.2f}). Nothing was spent.")
+        leads = min(a.limit, len(cells) * ROWS_CAP)
+        cost = dry_run_cost(leads, len(cells), a.paid_emails, a.verify, a.no_enrich)
+        resplit = " (+ ZIP-code searches for any city that returns 100 results)" if a.split == "auto" and \
+            any(c["kind"] == "city" for c in cells) else ""
+        mins = len(cells) * SECONDS_PER_SEARCH / SEARCH_WORKERS / 60
+        print(f"dry run: {len(cells)} Maps searches{resplit}, up to {leads} leads -> estimated ${cost:.4f}, "
+              f"searching takes up to ~{mins:.0f} min (stops early once --limit is reached). "
+              f"Hard limit --max-cost ${a.max_cost:.2f}. Nothing was spent.")
         return
     if Path(a.out).exists() and Path(a.out).stat().st_size and not a.resume:
         sys.exit(f"{a.out} already exists: add --resume to continue it, or choose another --out")
 
     treg = Treg(a.max_cost)
-    stats, site_errors = Counter(), Counter()
-    stop, saturated, cache = "", False, {}
+    stats, site_errors, area = Counter(), Counter(), Counter()
+    stop, cache, taken = "", {}, set()
     with LeadWriter(a.out, GOOGLE_COLUMNS, "place_id") as out:
-        resumed = len(out.seen)
-        candidates, taken = [], set()
-        try:
-            before = treg.spent_micro
-            rows, saturated = search_cell(treg, a.query, a.location)
-            search_micro = treg.spent_micro - before
-            stats["found"] = len(rows)
-            for raw in rows:
-                if len(candidates) >= a.limit - resumed:
-                    break
-                lead = map_place(raw, a.query, a.location)
-                if out.has(lead["place_id"]) or lead["place_id"] in taken:
-                    stats["duplicates"] += 1
-                elif not passes(lead, a.min_rating, a.min_reviews, a.require_website):
-                    stats["filtered"] += 1
-                else:
-                    candidates.append(lead)
-                    taken.add(lead["place_id"])
-        except (BudgetReached, OutOfBalance, TregError) as e:
-            stop, rows, search_micro = str(e), [], 0
-        share = search_micro / max(1, len(candidates))  # each lead carries its part of the search cost
+        resumed, quota = len(out.seen), max(0, a.limit - len(out.seen))
+        searches, enrichers = ThreadPoolExecutor(SEARCH_WORKERS), ThreadPoolExecutor(WORKERS)
+        pending = {}  # future -> ("search", cell) | ("enrich", (lead, search_share_micro))
+        todo = deque(cells)  # searches not started yet: started a few at a time, only while leads are still needed
 
-        def write(lead, spent_micro):
-            lead["cost_usd"] = round((share + spent_micro) / 1e6, 6)
+        def run_search(cell):
+            spend = LeadSpend(treg)
+            rows, saturated = search_cell(spend, a.query, cell["cell"])
+            return rows, saturated, spend.micro
+
+        def start_searches():
+            running = sum(1 for k, _ in pending.values() if k == "search")
+            while todo and running < SEARCH_WORKERS and not stop and stats["accepted"] < quota:
+                cell = todo.popleft()
+                pending[searches.submit(run_search, cell)] = ("search", cell)
+                running += 1
+
+        def cancel():
+            todo.clear()
+            for f in pending:
+                f.cancel()  # only not-yet-started work; running calls finish and are kept
+
+        def write(lead, share, spent):
+            lead["cost_usd"] = round((share + spent) / 1e6, 6)
             if out.write(lead):
                 stats["written"] += 1
                 stats["email"] += bool(lead.get("email"))
                 stats["phone"] += bool(lead.get("phone"))
                 stats["website"] += bool(lead.get("website"))
                 if stats["written"] % 10 == 0:
-                    print(f"  {stats['written']} leads | {stats['email']} with email | spent ${treg.spent_usd:.4f}")
+                    print(f"  {stats['written']} leads | {stats['email']} with email | {area['searched']} searches "
+                          f"| spent ${treg.spent_usd:.4f}")
 
-        if a.no_enrich:
-            for lead in candidates:
-                write(lead, 0)
-        elif candidates:
-            ex = ThreadPoolExecutor(WORKERS)
-            futures = {ex.submit(enrich, lead, treg, a.paid_emails, a.verify, cache): lead for lead in candidates}
+        def on_search(cell, f):
+            nonlocal stop
             try:
-                for f in as_completed(futures):
-                    try:
-                        lead, err, spent = f.result()
-                    except CancelledError:
-                        continue
-                    except (BudgetReached, OutOfBalance) as e:
-                        stop = stop or str(e)
-                        for g in futures:
-                            g.cancel()  # not-yet-started leads; running ones still finish and are written
-                        continue
-                    except Exception as e:  # a bug or odd site must not lose the lead: keep its Maps data
-                        lead, err, spent = futures[f], f"enrichment failed ({type(e).__name__})", 0
-                    if err:
-                        site_errors[re.sub(r" \(.*", "", err)] += 1
-                    write(lead, spent)
-            except KeyboardInterrupt:
-                stop = "stopped with Ctrl+C"
-                for g in futures:
-                    g.cancel()
-            finally:
-                ex.shutdown(wait=True, cancel_futures=True)
+                rows, saturated, micro = f.result()
+            except (BudgetReached, OutOfBalance) as e:
+                stop = stop or str(e)
+                return cancel()
+            except TregError:
+                area["failed"] += 1
+                return
+            area["searched"] += 1
+            area[cell["kind"] + "_cells"] += 1
+            stats["found"] += len(rows)
+            if saturated:
+                area["saturated"] += 1
+                if a.split == "auto" and cell["kind"] == "city":
+                    zips = zips_of(cell["city"], cell["state"])
+                    area["resplit"] += bool(zips)
+                    # the full city's ZIP codes go first, before the next (smaller) cities
+                    todo.extendleft({"cell": f"{z}, {cell['state']}", "kind": "zip", "city": cell["city"],
+                                     "state": cell["state"]} for z in reversed(zips))
+            new = []
+            for raw in rows:
+                if stats["accepted"] + len(new) >= quota:
+                    break
+                lead = map_place(raw, a.query, cell["cell"])
+                if out.has(lead["place_id"]) or lead["place_id"] in taken:
+                    stats["duplicates"] += 1
+                elif area_state and lead["state"] and lead["state"] != area_state:
+                    stats["outside"] += 1  # Maps results bleed across state lines
+                elif not passes(lead, a.min_rating, a.min_reviews, a.require_website):
+                    stats["filtered"] += 1
+                else:
+                    new.append(lead)
+                    taken.add(lead["place_id"])
+            stats["accepted"] += len(new)
+            share = micro / len(new) if new else 0  # each new lead carries its part of this search's cost
+            for lead in new:
+                if a.no_enrich:
+                    write(lead, share, 0)
+                else:
+                    pending[enrichers.submit(enrich, lead, treg, a.paid_emails, a.verify, cache)] = ("enrich", (lead, share))
+
+        def on_enrich(item, f):
+            nonlocal stop
+            lead, share = item
+            try:
+                lead, err, spent = f.result()
+            except (BudgetReached, OutOfBalance) as e:
+                stop = stop or str(e)
+                return cancel()
+            except Exception as e:  # a bug or odd site must not lose the lead: keep its Maps data
+                err, spent = f"enrichment failed ({type(e).__name__})", 0
+            if err:
+                site_errors[re.sub(r" \(.*", "", err)] += 1
+            write(lead, share, spent)
+
+        try:
+            start_searches()
+            while pending:
+                done, _ = wait(list(pending), return_when=FIRST_COMPLETED)
+                for f in done:
+                    kind, item = pending.pop(f)
+                    if not f.cancelled():
+                        (on_search if kind == "search" else on_enrich)(item, f)
+                start_searches()
+        except KeyboardInterrupt:
+            stop = "stopped with Ctrl+C"
+            cancel()
+        finally:
+            searches.shutdown(wait=True, cancel_futures=True)
+            enrichers.shutdown(wait=True, cancel_futures=True)
 
     n = stats["written"]
     pct = lambda k: f"{stats[k]}/{n} ({100 * stats[k] // n}%)" if n else "0"
     print(f"\n{n} new leads -> {a.out}" + (f" (+{resumed} already in the file)" if resumed else ""))
-    print(f"  email {pct('email')} | phone {pct('phone')} | website {pct('website')}")
-    print(f"  Maps: {stats['found']} places, {stats['duplicates']} duplicates, {stats['filtered']} filtered"
-          + (f" | search hit the {ROWS_CAP}-result cap: more places exist (M8 splits the area)" if saturated else ""))
+    emails = "not looked up (--no-enrich)" if a.no_enrich else pct("email")
+    print(f"  email {emails} | phone {pct('phone')} | website {pct('website')}")
+    print(f"  area: {area['searched']} searches ({area['city_cells']} cities, {area['zip_cells']} ZIP codes, "
+          f"{area['state_cells'] + area['free_cells']} other), {area['saturated']} hit the {ROWS_CAP}-result cap, "
+          f"{area['resplit']} cities re-searched by ZIP" + (f", {area['failed']} failed" if area["failed"] else ""))
+    print(f"  places: {stats['found']} found, {stats['duplicates']} duplicates, {stats['outside']} outside "
+          f"{area_state or 'area'}, {stats['filtered']} filtered")
     if site_errors:
         print("  websites not read: " + ", ".join(f"{k} x{v}" for k, v in site_errors.most_common()))
     print(f"  spent ${treg.spent_usd:.4f}" + (f" (${treg.spent_usd / n:.5f} per lead)" if n else "")

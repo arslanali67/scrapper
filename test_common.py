@@ -56,6 +56,51 @@ def test_budget_stops_before_overshoot():
     raise AssertionError("expected BudgetReached")
 
 
+def test_parallel_calls_never_overshoot_budget():
+    import threading
+    import time as _time
+    sent = []
+
+    def handler(req):
+        sent.append(1)
+        _time.sleep(0.3)  # keep calls in flight together
+        return reply(cost=1500)
+    t = treg(handler, budget=0.004)  # maps cap $0.002: two calls may be in flight, a third may not
+    outcome = []
+
+    def worker():
+        try:
+            t.call("maps_search", {})
+            outcome.append("ok")
+        except BudgetReached:
+            outcome.append("budget")
+    threads = [threading.Thread(target=worker) for _ in range(5)]
+    [th.start() for th in threads]
+    [th.join() for th in threads]
+    assert sorted(outcome) == ["budget"] * 3 + ["ok"] * 2 and len(sent) == 2 and t.spent_micro == 3000 <= 4000
+    t2 = treg(handler, budget=0.01)  # with room, 5 parallel calls take ~one call's time, not five
+    start = _time.time()
+    threads = [threading.Thread(target=lambda: t2.call("maps_search", {})) for _ in range(5)]
+    [th.start() for th in threads]
+    [th.join() for th in threads]
+    assert _time.time() - start < 1.0 and t2.spent_micro == 7500
+
+
+def test_timeout_keeps_cap_reserved():
+    def handler(req):
+        raise httpx.ReadTimeout("slow", request=req)
+    t = treg(handler, budget=0.003)
+    try:
+        t.call("maps_search", {})
+    except TregError:
+        pass
+    try:  # 2000 unsettled + 2000 cap > 3000: the possibly-billed timeout still counts against the budget
+        t.call("maps_search", {})
+        raise AssertionError("expected BudgetReached")
+    except BudgetReached:
+        pass
+
+
 def test_retry_429_then_ok():
     n = {"calls": 0}
 
