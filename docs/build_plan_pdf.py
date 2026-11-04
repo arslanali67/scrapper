@@ -238,7 +238,7 @@ MODULES = [
 
     # ---------------- Google
     dict(id="M6", title="Google Maps Search", tag="PHASE 2 · P0", pri="P0",
-         state="Does not exist",
+         state="Done (Nov 4): 50/50 rows with phone, website, ZIP",
          goal="Turn one search cell, a business type plus one city or ZIP code (&quot;dentists&quot; in &quot;Austin, TX&quot;), "
               "into unique businesses with every field Google shows: website, phone, address, rating, reviews, hours, "
               "status. M8 runs many cells to cover a whole state.",
