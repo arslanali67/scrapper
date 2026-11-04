@@ -44,7 +44,8 @@ Chosen IDs, caps and example params are in [`endpoints.json`](../endpoints.json)
 3. **M9/M10:** primary people discovery is `icypeas.people.search` with `currentJobTitle` + `profileLocation` + `currentCompany.industry`. Rows already include company name, website, size and industry, so M10's profile and company lookups are only needed for the X-ray fallback. The local location filter is still kept.
 4. **M11:** tier 1 blitzapi, tier 2 routed finder only for misses, and no `X-Treg-Route-Verify`.
 5. **M5:** the paid domain search (hunter) is opt-in, not automatic.
-6. **M12 company mode:** discovery via `treg.companies.search`.
+6. **M12 company mode:** discovery via `treg.companies.search` (changed in M12 to `icypeas.companies.search`,
+   which can filter by state and city).
 
 ## Measured later
 
@@ -80,6 +81,27 @@ Chosen IDs, caps and example params are in [`endpoints.json`](../endpoints.json)
     Without tomba, the 4 email-less people re-ran in 7-16 s each: 3 misses ($0) and that moltsets hit.
   `GET /calls` (call history with `cost_charged_micro` per provider attempt) and `GET /orgs/56333/balance` work with
   the agent token.
+
+- **M12 command and company mode** (2026-11-04):
+  - **Dry run (L-A3):** `icypeas.people.search.count` and `icypeas.companies.search.count` are free
+    (`X-Treg-Cost-Micro: 0`); the balance stayed at 616,932 micro-USD across four dry runs. HR x tech x Texas counts
+    7,760, the same as the search's own total.
+  - **Page tokens expire:** a 6-day-old icypeas token returned 0 rows and total 0, with no error. So `--resume` pages
+    the search again from the start ($0.00038 per row already in the file) and skips those rows before any lookup.
+  - **L-A1 + L-A4:** the M11 file (20 people) resumed to `--limit 50`: exactly 30 email lookups, all for new people;
+    50/50 in Texas with an HR title; work email **38/50 (76%)**; the 30 new people took **42 s** with 8 in parallel
+    (M11: 20 people in 9 min, one at a time, with tomba); $0.0659 ($0.0022 per new person).
+  - **Company mode** uses `icypeas.companies.search` ($0.00038 per row). `treg.companies.search` has no state or city
+    filter. Filters: `keyword`, `location` ("Texas, United States": 2,081 SaaS companies), `industry`, `headcount`
+    (`>=`/`<=` work). `--input` URLs: one `{companyId: {include: [url]}}` lookup each.
+  - **L-A2:** 20 company URLs in, exactly those 20 out. Name, industry, HQ, website, description, founded year and
+    type 20/20, size band 19/20; website emails 9/20 (3 bot-checked homepages skipped, 2 robots.txt refusals
+    respected); $0.0077.
+  - **Company search** "SaaS" + Texas, 20 companies: all with a Texas HQ, all mention SaaS; website emails 9/20
+    (5 sites unreachable, 2 without a website); $0.0089.
+  - **Budget with parallel calls:** each call in flight reserves its cap (8 workers x up to $0.011), which could end
+    a small `--max-cost` run early. `Treg` now waits for calls in flight to settle and stops only when the next call
+    cannot fit even then.
 
 ## Not measured yet
 

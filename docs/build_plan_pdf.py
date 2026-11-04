@@ -403,7 +403,7 @@ MODULES = [
          done="On 20 qualified people about half or more get a work email (M1 rate), and nobody is looked up twice."),
 
     dict(id="M12", title="LinkedIn Scraper CLI & Company Mode", tag="PHASE 3 · P0/P1", pri="P0/P1",
-         state="Does not exist",
+         state="Done (Nov 4): L-A1..L-A4 pass; 30 people in 42 s",
          goal="One command with two modes: people (default, P0) for contacts like HR managers, and company (P1) for "
               "company-level leads.",
          used_by="LinkedIn scraper",
@@ -411,14 +411,22 @@ MODULES = [
                "Company mode: company search or URL list -&gt; company profile -&gt; website deep scrape (P1).",
                "Same common flags as the Google scraper."],
          how=[f"People: {c('python linkedin_scraper.py --role &quot;HR&quot; --industry tech --location &quot;Texas&quot; --limit 300 --max-cost 20 --out hr_texas.csv')}. "
-              f"Flags: {c('--role')}, {c('--titles')}, {c('--industry')}, {c('--location')}, {c('--fast')}, {c('--phone')}, {c('--limit')}.",
+              f"Flags: {c('--role')}, {c('--titles')}, {c('--industry')}, {c('--location')}, {c('--size')}, {c('--source')}, "
+              f"{c('--phone')}, {c('--no-fallback')}, {c('--limit')}. The planned {c('--fast')} (skip the profile lookup) "
+              "was dropped: the people search needs no lookup, and on X-ray rows M10 found 28 of 48 no longer matching.",
               f"Company: {c('python linkedin_scraper.py --mode company --keyword &quot;SaaS&quot; --location &quot;Texas&quot; --limit 200')} "
-              f"or {c('--input company_urls.txt')}. Discovery via {c('treg.companies.search')} (50 companies with website, phone and LinkedIn URL for ~$0.0002 in "
-              f"M1); URL lists via {c('treg.linkedin.company.profile')}; then M4 / M5 for company emails.",
-              f"Common flags: {c('--max-cost --dry-run --resume --no-enrich --verify --suppress --out')}.",
-              "People pipeline: M9 queries -&gt; M10 profile + filters -&gt; M11 email -&gt; write row; progress every 10.",
-              "Dry-run: queries x pages x search price + expected profiles x (profile price + company price shared "
-              "per company + email price).",
+              f"or {c('--input company_urls.txt')}. Discovery via {c('icypeas.companies.search')} ($0.00038 per company; "
+              f"keyword, location, industry and headcount filters; 2,081 SaaS companies in Texas), not "
+              f"{c('treg.companies.search')}, which has no state or city filter. URL lists: one {c('companyId')} lookup "
+              "per URL, every URL gets a row. Then the M10 domain step and M4 / M5 for company emails.",
+              f"Common flags: {c('--max-cost --dry-run --resume --no-enrich --verify --out')}, plus {c('--paid-emails')} in "
+              f"company mode; {c('--suppress')} comes with M14.",
+              "People pipeline: M9 queries -&gt; M10 profile + filters -&gt; M11 email -&gt; write row, 8 people at a "
+              "time; progress every 10. Ctrl+C finishes the lookups in progress and writes them.",
+              f"Dry-run: the free {c('icypeas.people.search.count')} / {c('icypeas.companies.search.count')} gives the "
+              "real number of matches, then the measured M10/M11 rates x prices. The balance does not move.",
+              "Resume: rows already in the file are skipped before any lookup. Search page tokens expire, so the "
+              "search is paged again from the start ($0.00038 per row already in the file).",
               "Never import google_scraper.py, and vice versa: shared code lives only in common.py."],
          files="linkedin_scraper.py (main)",
          deps="none new",

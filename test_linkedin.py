@@ -1,11 +1,13 @@
 """Offline checks for linkedin_scraper.py (no network, no spend). Run: python test_linkedin.py"""
 import csv
+import io
 import tempfile
 from collections import Counter
+from contextlib import redirect_stdout
 from pathlib import Path
 
 import linkedin_scraper as ls
-from common import TregError, cell
+from common import TregError, cell, domain_of
 
 HR = ls.title_variants("HR")
 
@@ -145,11 +147,13 @@ def test_find_contact_tiers_verify_phone():
 def test_process_never_uses_a_linkedin_link_as_domain():
     p = person(1, lastCompanyWebsite="https://www.linkedin.com/company/beta", lastCompanyUrl="https://www.linkedin.com/company/beta")
     t = Fake(company_domain_from_linkedin=lambda q: {"found": True, "email_domain": "beta.io"}, email_find_person=lambda q: {})
-    lead, reason, how, _ = ls.process(p, t, HR, "TX", {}, "q", fallback=False)
+    lead, reason, how, _ = ls.process(p, t, HR, "TX", {}, "q", {"fallback": False})
     assert (lead["domain"], lead["website"], how, reason) == ("beta.io", "https://beta.io", "linkedin page", "")
     t = Fake(company_domain_from_linkedin=lambda q: {"found": False}, company_by_name=lambda q: {}, email_find_person=lambda q: {})
-    lead, *_ = ls.process(p, t, HR, "TX", {}, "q", fallback=False)
+    lead, *_ = ls.process(p, t, HR, "TX", {}, "q", {"fallback": False})
     assert lead["domain"] == ""  # not "linkedin.com"
+    lead, *_ = ls.process(p, t, HR, "TX", {}, "q", None)  # --no-enrich: no email lookup at all
+    assert "email_find_person" not in [c for c, _ in t.calls[3:]]
 
 
 class PagedTreg(Fake):
@@ -184,13 +188,13 @@ class PagedTreg(Fake):
 
 def test_people_search_pages_exactly_and_dedupes():
     t, seen = PagedTreg(), set()
-    rows, total, token = ls.people_search(t, {"q": 1}, 250, seen)
+    rows, total, token = ls.icypeas_search(t, {"q": 1}, 250, seen)
     sizes = [c[1]["pagination"]["size"] for c in t.calls]
     assert sizes == [100, 100, 50] and total == 5000 and len(rows) == 250 and len(seen) == 250 and token is None
     assert [c[1]["pagination"].get("token") for c in t.calls] == [None, "t1", "t2"]
-    rows, _, token = ls.people_search(PagedTreg(), {"q": 1}, 10_000, set())  # stops when the token runs out
+    rows, _, token = ls.icypeas_search(PagedTreg(), {"q": 1}, 10_000, set())  # stops when the token runs out
     assert len(rows) == 300 and token is None
-    rows, _, token = ls.people_search(PagedTreg(), {"q": 1}, 40, set())
+    rows, _, token = ls.icypeas_search(PagedTreg(), {"q": 1}, 40, set())
     assert len(rows) == 40 and token == "t1"  # more pages left: caller can continue
 
 
@@ -204,9 +208,9 @@ def test_xray_queries_and_parsing():
     assert [r["profileUrl"] for r in rows] == ["https://www.linkedin.com/in/ann-lee"]  # job link dropped, dup dropped
 
 
-def run(*args, make=person):
-    out = Path(tempfile.mkdtemp()) / "p.csv"
-    t = PagedTreg(make, pages=10)
+def run(*args, make=person, out=None, t=None):
+    out = out or Path(tempfile.mkdtemp()) / "p.csv"
+    t = t or PagedTreg(make, pages=10)
     t.log_path = Path(tempfile.mkdtemp()) / "run.jsonl"
     ls.Treg = lambda max_cost: t
     ls.main([*args, "--out", str(out)])
@@ -219,9 +223,9 @@ def test_main_people_keeps_paging_past_rejects():
     rows, t = run("--role", "HR", "--industry", "tech", "--location", "Texas", "--limit", "120", make=make)
     assert len(rows) == 120 and len({r["person_linkedin_url"] for r in rows}) == 120
     assert not any("Seattle" in r["person_location"] for r in rows)
-    r = rows[0]
-    assert r["person_linkedin_url"] == "https://www.linkedin.com/in/person-0" and r["website"] == "https://www.co0.com"
-    assert r["domain"] == "co0.com" and r["full_name"] == "First0 Last0" and r["city"] == "Austin"
+    r = next(r for r in rows if r["person_linkedin_url"] == "https://www.linkedin.com/in/person-0")  # threads: any order
+    assert r["website"] == "https://www.co0.com" and r["domain"] == "co0.com" and r["full_name"] == "First0 Last0"
+    assert r["city"] == "Austin"
     rejected = [l for l in t.log_path.with_name("run-rejected.jsonl").read_text().splitlines()]
     assert rejected and all("outside TX" in l for l in rejected)
     # nobody is looked up twice; only kept people are; tier 2 only for tier-1 misses
@@ -236,13 +240,120 @@ def test_main_xray_looks_profiles_up_and_fills_domain():
     rows, t = run("--role", "HR", "--location", "Texas", "--source", "xray", "--limit", "5")
     assert [r["full_name"] for r in rows] == ["Ann Lee"] and rows[0]["job_title"] == "HR Director"
     assert rows[0]["domain"] == "acme.com" and rows[0]["website"] == "https://acme.com"
-    assert [c for c, _ in t.calls][:3] == ["serp", "people_enrich", "company_by_name"]
+    assert [c for c, _ in t.calls if c != "serp"][:2] == ["people_enrich", "company_by_name"]
 
 
 def test_main_stops_when_nobody_matches():
     rows, t = run("--role", "HR", "--location", "Texas", "--limit", "500",
                   make=lambda i: person(i, lastJobTitle="Software Engineer"))
     assert rows == [] and len([c for c in t.calls if c[0] == "people_search"]) == 1  # not 5,000 paid rows
+
+
+def test_resume_never_repeats_a_lookup():  # L-A4
+    out = Path(tempfile.mkdtemp()) / "p.csv"
+    first, _ = run("--role", "HR", "--location", "Texas", "--limit", "30", out=out)
+    rows, t = run("--role", "HR", "--location", "Texas", "--limit", "60", "--resume", out=out)
+    again = {p["person_linkedin_url"] for c, p in t.calls if c == "email_find_person"}
+    assert len(rows) == 60 and len({r["person_linkedin_url"] for r in rows}) == 60
+    assert len(again) == 30 and not again & {r["person_linkedin_url"] for r in first}
+    try:
+        run("--role", "HR", "--location", "Texas", out=out)  # an existing file needs --resume
+        raise AssertionError("expected an exit")
+    except SystemExit as e:
+        assert "--resume" in str(e)
+
+
+def test_ctrl_c_writes_everyone_already_looked_up():
+    class Interrupted(PagedTreg):
+        def call(self, capability, params=None, tally=None, max_cost=None):
+            if capability == "people_search" and any(c == "people_search" for c, _ in self.calls):
+                raise KeyboardInterrupt  # Ctrl+C while the second page is being bought
+            return super().call(capability, params, tally, max_cost)
+    with redirect_stdout(io.StringIO()):
+        rows, t = run("--role", "HR", "--location", "Texas", "--limit", "150", t=Interrupted(pages=10))
+    looked = {p["person_linkedin_url"] for c, p in t.calls if c == "email_find_person"}
+    # queued people are cancelled before any lookup; everyone already looked up is written, none thrown away
+    assert 90 <= len(rows) <= 100 and looked == {r["person_linkedin_url"] for r in rows}
+
+
+def test_dry_run_spends_nothing():  # L-A3
+    t = Fake(people_count=lambda p: {"total": 7760}, companies_count=lambda p: {"total": 2081})
+    ls.Treg = lambda max_cost: t
+    out = Path(tempfile.mkdtemp()) / "never.csv"
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        ls.main(["--role", "HR", "--industry", "tech", "--location", "Texas", "--limit", "500", "--verify",
+                 "--dry-run", "--out", str(out)])
+        ls.main(["--mode", "company", "--keyword", "SaaS", "--location", "Texas", "--dry-run"])
+    assert [c for c, _ in t.calls] == ["people_count", "companies_count"] and not out.exists()
+    assert t.calls[0][1]["query"]["profileLocation"] == {"include": ["Texas, United States"]}
+    assert t.calls[1][1]["query"] == {"keyword": {"include": ["SaaS"]}, "location": {"include": ["Texas, United States"]}}
+    text = buf.getvalue()
+    assert "7760 people match; up to 500" in text and "2081 companies match; up to 100" in text and "$0.0000" in text
+
+
+def company_row(lid, name, **kw):
+    return {"name": name, "lid": lid, "urn": "urn:li:fs_salesCompany:99", "url": f"https://www.linkedin.com/company/{lid}/",
+            "address": "801 Barton Springs Road, 78704, Austin, Texas, United States of America",
+            "headcountRange": {"gte": 51, "lte": 200}, "numberOfEmployees": 55, "industry": "Software Development",
+            "foundedYear": 2016, "type": "Privately Held", "website": f"https://www.{lid}.com", "slogan": "We sync",
+            "specialties": [{"value": "SaaS"}, {"value": "software"}], "pictureUrl": "https://img.example/x.png",
+            "phone": "", **kw}
+
+
+class CompanyTreg(Fake):
+    """icypeas company fake: by-URL lookups know 'acme' and the numeric id 12345; searches page forever."""
+
+    def call(self, capability, params=None, tally=None, max_cost=None):
+        self.calls.append((capability, params))
+        if capability == "company_domain_from_linkedin":
+            return {"found": False}
+        q = params["query"]
+        if "companyId" in q:
+            slug = q["companyId"]["include"][0].rsplit("/", 1)[-1]
+            known = {"acme": company_row("acme", "Acme"),
+                     "12345": company_row("beta-co", "Beta", urn="urn:li:fs_salesCompany:12345")}
+            return {"total": int(slug in known), "leads": [known[slug]] if slug in known else []}
+        n = len([c for c in self.calls if c[0] == "companies_search"])
+        return {"total": 2081, "pagination": {"token": f"t{n}"},
+                "leads": [company_row(f"co-{n}-{i}", f"Co {n}-{i}") for i in range(params["pagination"]["size"])]}
+
+
+def test_company_mapping_and_url_file():
+    c = ls.map_company(company_row("cirasync", "CiraSync"))
+    assert (c["company_name"], c["city"], c["country"], c["company_size"], c["domain"]) == \
+        ("CiraSync", "Austin", "United States of America", "51-200", "cirasync.com")
+    assert c["source_url"] == "https://www.linkedin.com/company/cirasync" and cell(c["specialties"]) == "SaaS | software"
+    assert ls.map_company({"headcountRange": {"gte": 10001}, "url": "x"})["company_size"] == "10001+"
+    assert ls.company_query("SaaS, fintech", "Austin, TX", ["Software Development"], "11-50") == {
+        "keyword": {"include": ["SaaS", "fintech"]}, "location": {"include": ["Austin, Texas"]},
+        "industry": {"include": ["Software Development"]}, "headcount": {">=": 11, "<=": 50}}
+    f = Path(tempfile.mkdtemp()) / "urls.txt"
+    f.write_text("https://www.linkedin.com/company/acme/\nhttps://WWW.linkedin.com/company/Acme?trk=1\nname,url\n"
+                 "Beta,https://www.linkedin.com/company/12345\nnot a url\nhttps://www.linkedin.com/company/ghost-co\n")
+    assert ls.read_company_urls(f) == ["https://www.linkedin.com/company/acme", "https://www.linkedin.com/company/12345",
+                                       "https://www.linkedin.com/company/ghost-co"]
+    return f
+
+
+def test_main_company_input_returns_exactly_those():  # L-A2
+    ls.crawl_site = lambda url, treg=None: {"emails": [f"info@{domain_of(url)}"], "phones": ["+1 512-474-1234"],
+                                            "facebook": "https://facebook.com/x"}
+    with redirect_stdout(io.StringIO()):
+        rows, t = run("--mode", "company", "--input", str(test_company_mapping_and_url_file()), t=CompanyTreg())
+    by = {r["source_url"].rsplit("/", 1)[1]: r for r in rows}
+    assert sorted(by) == ["12345", "acme", "ghost-co"]  # the duplicate counted once, the unknown one kept
+    assert (by["acme"]["company_name"], by["acme"]["email"], by["acme"]["email_source"]) == ("Acme", "info@acme.com", "website")
+    assert by["12345"]["company_name"] == "Beta" and by["acme"]["socials"] == "https://facebook.com/x"
+    assert by["ghost-co"]["company_name"] == "" and by["acme"]["phone"] == "+1 512-474-1234"
+
+
+def test_main_company_search_pages_to_the_limit():
+    rows, t = run("--mode", "company", "--keyword", "SaaS", "--location", "Texas", "--limit", "5", "--no-enrich",
+                  t=CompanyTreg())
+    assert len(rows) == 5 and t.calls[0][1] == {"query": {"keyword": {"include": ["SaaS"]}, "location": {
+        "include": ["Texas, United States"]}}, "pagination": {"size": 5}}
+    assert rows[0]["company_size"] == "51-200" and rows[0]["email"] == ""
 
 
 if __name__ == "__main__":

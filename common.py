@@ -58,6 +58,7 @@ class Treg:
         Path(log_dir).mkdir(exist_ok=True)
         self.log_path = Path(log_dir) / f"{datetime.now():%Y%m%d-%H%M%S}.jsonl"
         self._lock = threading.Lock()
+        self._settled = threading.Condition(self._lock)  # notified whenever a call in flight settles
         self._reserved = 0  # worst-case cost of calls in flight
         self._unsettled = 0  # timed-out calls: may still bill server-side, so their cap stays counted
 
@@ -68,20 +69,25 @@ class Treg:
     def call(self, capability, params=None, tally=None, max_cost=None):
         """Call the endpoint chosen for `capability` in endpoints.json. Returns the parsed JSON. Thread-safe, and calls
         run in parallel: each reserves its worst-case cost (the per-call cap) first and settles to the real cost after,
-        so --max-cost can never be overshot however many threads call at once.
+        so --max-cost can never be overshot however many threads call at once. A call that does not fit while others
+        are in flight waits for them to settle (their real cost is usually far below the cap); BudgetReached comes
+        only when it cannot fit even with nothing in flight.
         tally: optional list; the call's charged micro-USD is appended to it (also when the call then fails).
         max_cost: a tighter per-call cap in USD for this call (e.g. a small page of a per-row priced search)."""
         ep = ENDPOINTS[capability]
         cap_micro = round(min(ep["max_cost_usd"], max_cost if max_cost is not None else ep["max_cost_usd"]) * 1e6)
-        with self._lock:
-            if self.spent_micro + self._reserved + self._unsettled + cap_micro > self.budget_micro:
-                raise BudgetReached(f"budget ${self.budget_micro / 1e6:.2f} reached (spent ${self.spent_usd:.4f})")
+        with self._settled:
+            while self.spent_micro + self._reserved + self._unsettled + cap_micro > self.budget_micro:
+                if not self._reserved:
+                    raise BudgetReached(f"budget ${self.budget_micro / 1e6:.2f} reached (spent ${self.spent_usd:.4f})")
+                self._settled.wait()
             self._reserved += cap_micro
         try:
             return self._call(capability, ep, cap_micro, params, tally)
         finally:
-            with self._lock:
+            with self._settled:
                 self._reserved -= cap_micro
+                self._settled.notify_all()
 
     def _call(self, capability, ep, cap_micro, params, tally):
         headers = {"X-Treg-Route-Max-Cost": f"{cap_micro / 1e6:.6f}".rstrip("0").rstrip("."), **ep.get("headers", {})}
@@ -646,6 +652,23 @@ def crawl_site(url, region="US", treg=None, client=None):
 
 
 # ---------------------------------------------------------------- paid enrichment (M5)
+# Website-enrichment rates for --dry-run, measured on 20 Austin dentists (docs/endpoints.md); used by both scrapers.
+SHARE_JS_SITE = 0.05      # sites that need treg to render JavaScript (0/20 measured; kept above zero on purpose)
+SHARE_NO_EMAIL = 0.45     # readable sites without an email (8/18)
+SHARE_HUNTER_HIT = 0.40   # of those, domains Hunter knows and bills for (3/8)
+SHARE_EMAIL = 0.70        # leads with an email to verify (13/18 with --paid-emails)
+
+
+def enrich_calls(leads, paid_emails=False, verify=False):
+    """Expected paid calls of crawl_site + enrich_paid on `leads` websites, as {capability: calls} for estimate()."""
+    calls = {"web_extract": leads * SHARE_JS_SITE}
+    if paid_emails:
+        calls["company_emails_by_domain"] = leads * SHARE_NO_EMAIL * SHARE_HUNTER_HIT
+    if verify:
+        calls["email_verify"] = leads * SHARE_EMAIL
+    return calls
+
+
 def email_status(verify_output):
     """treg.people.email.verify output -> 'valid' | 'risky' | 'invalid' (providers use their own words)."""
     o = verify_output or {}

@@ -16,19 +16,14 @@ from datetime import datetime
 from pathlib import Path
 
 from common import (ENDPOINTS, GOOGLE_COLUMNS, BudgetReached, LeadSpend, LeadWriter, OutOfBalance, Treg, TregError,
-                    cities_of, crawl_site, domain_of, enrich_paid, estimate, normalize_phone, state_code, states,
-                    zip_state, zips_of)
+                    cities_of, crawl_site, domain_of, enrich_calls, enrich_paid, estimate, normalize_phone, state_code,
+                    states, zip_state, zips_of)
 
 ROWS_CAP = ENDPOINTS["maps_search"]["rows_cap"]  # one search never returns more (M1): a full cell is "saturated"
 # "..., Austin, TX 78704" or "..., Austin, TX 78704, United States"
 US_ADDRESS_RE = re.compile(r",\s*([^,]+?),\s*([A-Z]{2})\s+(\d{5})(?:-\d{4})?(?:,\s*(?:USA|United States))?\s*$")
 SITE_FIELDS = ("facebook", "instagram", "linkedin", "x", "youtube", "tiktok", "site_description", "services",
                "team_members", "contact_form_url", "site_address")
-# Dry-run rates measured on 20 Austin dentists (docs/endpoints.md); refine as real runs come in.
-SHARE_JS_SITE = 0.05      # sites that need treg to render JavaScript (0/20 measured; kept above zero on purpose)
-SHARE_NO_EMAIL = 0.45     # readable sites without an email (8/18)
-SHARE_HUNTER_HIT = 0.40   # of those, domains Hunter knows and bills for (3/8)
-SHARE_EMAIL = 0.70        # leads with an email to verify (13/18 with --paid-emails)
 WORKERS = 8               # websites scraped in parallel
 SEARCH_WORKERS = 4        # Maps searches in parallel (each takes ~30 s)
 SECONDS_PER_SEARCH = 35   # for the dry-run time estimate
@@ -111,14 +106,7 @@ def enrich(lead, treg, paid_emails, verify, cache):
 
 
 def dry_run_cost(leads, cells, paid_emails, verify, no_enrich=False):
-    calls = {"maps_search": cells}
-    if not no_enrich:
-        calls["web_extract"] = leads * SHARE_JS_SITE
-        if paid_emails:
-            calls["company_emails_by_domain"] = leads * SHARE_NO_EMAIL * SHARE_HUNTER_HIT
-        if verify:
-            calls["email_verify"] = leads * SHARE_EMAIL
-    return estimate(calls)
+    return estimate({"maps_search": cells, **({} if no_enrich else enrich_calls(leads, paid_emails, verify))})
 
 
 def main(argv=None):

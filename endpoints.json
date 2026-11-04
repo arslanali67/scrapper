@@ -13,8 +13,8 @@
   "serp": {
     "id": "treg.google.serp.organic",
     "method": "POST",
-    "price_usd": 0.00015,
-    "price_type": "per 10 results of depth (limit 100 = $0.0015)",
+    "price_usd": 0.0015,
+    "price_type": "per call at limit 100 ($0.00015 per 10 results of depth)",
     "max_cost_usd": 0.005,
     "params": {"q": "site:linkedin.com/in (\"HR Manager\" OR \"Recruiter\") \"Austin\" \"software\"", "limit": 100},
     "note": "Rows: title, url, snippet, displayed_url, domain, position. Fallback discovery for people (X-ray); also company-name -> domain lookups."
@@ -42,7 +42,25 @@
       },
       "pagination": {"size": 100}
     },
-    "note": "Primary people discovery. Use profileLocation (20/20 in-state); plain 'location' matched 13/20. Page with pagination.token from the previous response. Rows carry profileUrl, lastJobTitle, address, lastCompanyName/Url/Website/Size/Industry, so no profile or company lookup is needed."
+    "note": "Primary people discovery. Use profileLocation (20/20 in-state); plain 'location' matched 13/20. Page with pagination.token from the previous response; tokens expire (a 6-day-old one returned 0 rows and total 0, no error). Rows carry profileUrl, lastJobTitle, address, lastCompanyName/Url/Website/Size/Industry, so no profile or company lookup is needed."
+  },
+  "people_count": {
+    "id": "icypeas.people.search.count",
+    "method": "POST",
+    "price_usd": 0.0,
+    "price_type": "free (verified: X-Treg-Cost-Micro 0)",
+    "max_cost_usd": 0.001,
+    "params": {"query": {"currentJobTitle": {"include": ["HR Manager"]}, "profileLocation": {"include": ["Texas, United States"]}}},
+    "note": "--dry-run: how many people match, before paying for rows. Same filter object as people_search. Response: total, success."
+  },
+  "companies_count": {
+    "id": "icypeas.companies.search.count",
+    "method": "POST",
+    "price_usd": 0.0,
+    "price_type": "free (verified: X-Treg-Cost-Micro 0)",
+    "max_cost_usd": 0.001,
+    "params": {"query": {"keyword": {"include": ["SaaS"]}, "location": {"include": ["Texas, United States"]}}},
+    "note": "--dry-run in company mode. Same filter object as companies_search. Response: total, success."
   },
   "people_enrich": {
     "id": "treg.people.enrich",
@@ -63,13 +81,13 @@
     "note": "Company mode. Test returned name, description, followers, employees, location but no website."
   },
   "companies_search": {
-    "id": "treg.companies.search",
+    "id": "icypeas.companies.search",
     "method": "POST",
-    "price_usd": 0.000178,
-    "price_type": "per call (served by tomba, 50 rows)",
-    "max_cost_usd": 0.01,
-    "params": {"industry": "software", "country": "US", "limit": 50},
-    "note": "Company mode discovery. Rows: name, website_url, phone_number, linkedin_url, city, state, industry, company_size, founded."
+    "price_usd": 0.00038,
+    "price_type": "per row returned (pagination.size is the price dial, max 200)",
+    "max_cost_usd": 0.08,
+    "params": {"query": {"keyword": {"include": ["SaaS"]}, "location": {"include": ["Texas, United States"]}}, "pagination": {"size": 100}},
+    "note": "Company mode (M12): discovery by keyword / location / industry / headcount, and --input URLs one by one via {companyId: {include: [url]}}. Chosen over treg.companies.search, which has no state or city filter. Rows: name, lid, urn, url, description, address ('[street,] [ZIP,] City, State, Country'), numberOfEmployees, headcountRange {gte, lte}, industry, foundedYear, type, website, slogan, specialties [{value}], pictureUrl, phone. 'SaaS' + 'Texas, United States' = 2,081 matches."
   },
   "company_domain_from_linkedin": {
     "id": "blitzapi.companies.linkedin-to-domain",
@@ -101,8 +119,8 @@
   "email_find_person_fallback": {
     "id": "treg.people.email.find",
     "method": "POST",
-    "price_usd": 0.005,
-    "price_type": "per hit ($0.0048 quickenrich - $0.01 moltsets); misses free once orbisearch is excluded",
+    "price_usd": 0.0056,
+    "price_type": "per hit, M11 average ($0.0048 quickenrich - $0.01 moltsets); misses free once orbisearch is excluded",
     "max_cost_usd": 0.011,
     "headers": {"X-Treg-Route-Exclude": "blitzapi,enrow,orbisearch,tomba"},
     "timeout_s": 180,
@@ -121,11 +139,11 @@
   "phone_find_person": {
     "id": "treg.people.phone.find",
     "method": "POST",
-    "price_usd": 0.000495,
-    "price_type": "per hit, no provider bills misses",
+    "price_usd": 0.0007,
+    "price_type": "per hit, M11 average (leadocean free, blitzapi $0.000495, quickenrich $0.0048); no provider bills misses",
     "max_cost_usd": 0.005,
     "params": {"linkedin_url": "https://www.linkedin.com/in/<slug>"},
-    "note": "--phone only. 0/1 hit in test; measure again on real runs."
+    "note": "--phone only. M11: 13/20 hits."
   },
   "company_emails_by_domain": {
     "id": "hunter.companies.emails",

@@ -102,6 +102,23 @@ def test_parallel_calls_never_overshoot_budget():
     [th.start() for th in threads]
     [th.join() for th in threads]
     assert _time.time() - start < 1.0 and t2.spent_micro == 7500
+    # Caps far above the real cost must not end a run early: a call that does not fit waits for those in flight.
+    t3 = treg(lambda req: (_time.sleep(0.1), reply(cost=150))[1], budget=0.005)  # cap $0.002: only 2 fit at once
+    outcome.clear()
+    threads = [threading.Thread(target=worker_on(t3, outcome)) for _ in range(5)]
+    [th.start() for th in threads]
+    [th.join() for th in threads]
+    assert outcome == ["ok"] * 5 and t3.spent_micro == 750
+
+
+def worker_on(t, outcome):
+    def run():
+        try:
+            t.call("maps_search", {})
+            outcome.append("ok")
+        except BudgetReached:
+            outcome.append("budget")
+    return run
 
 
 def test_timeout_keeps_cap_reserved():
