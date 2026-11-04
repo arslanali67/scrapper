@@ -325,12 +325,69 @@ def normalize_phone(raw, region="US"):
     return phonenumbers.format_number(n, phonenumbers.PhoneNumberFormat.INTERNATIONAL)
 
 
+# ---------------------------------------------------------------- suppression list (M14)
+class Suppression:
+    """Opted-out contacts (--suppress, default suppress.txt when it exists): one email or domain per line, '#' starts
+    a comment. A matching domain, or any of its subdomains, drops the whole lead; a matching email is removed from it."""
+
+    def __init__(self, path=None):
+        self.path, self.emails, self.domains = path, set(), set()
+        for line in (Path(path).read_text(encoding="utf-8-sig").splitlines() if path else []):
+            item = line.split("#", 1)[0].strip().strip(",;\"'").lower()
+            if "@" in item.lstrip("@"):
+                self.emails.add(item)
+            elif item:
+                self.domains.add(domain_of(item.lstrip("@")))
+        self.domains.discard("")
+
+    def __len__(self):
+        return len(self.emails) + len(self.domains)
+
+    def blocks_domain(self, *urls_or_emails):
+        hosts = {domain_of(v) for v in urls_or_emails if v} - {""}
+        return any(h == d or h.endswith("." + d) for h in hosts for d in self.domains)
+
+    def blocks_email(self, email):
+        return email.lower() in self.emails or self.blocks_domain(email)
+
+    def apply(self, lead):
+        """-> (keep the lead?, emails removed). Edits the lead's email / all_emails in place."""
+        if self.blocks_domain(lead.get("domain"), lead.get("website")):
+            return False, 0
+        emails = lead.get("all_emails") or []
+        emails = [e.strip() for e in emails.split("|")] if isinstance(emails, str) else list(emails)
+        found = {e.lower() for e in [*emails, lead.get("email") or ""] if e}
+        keep = [e for e in emails if e and not self.blocks_email(e)]
+        if lead.get("email") and self.blocks_email(lead["email"]):
+            lead.update(email=keep[0] if keep else "", email_status="")
+            if not keep:
+                lead["email_source"] = ""
+        lead["all_emails"] = keep
+        return True, len(found - {e.lower() for e in [*keep, lead.get("email") or ""] if e})
+
+    def summary(self, writer, skipped=0):
+        """'' or one summary line: what the list removed from this run (skipped: leads dropped before the writer)."""
+        if not len(self):
+            return ""
+        return (f"  suppression list {self.path} ({len(self)} entries): leads dropped {writer.suppressed + skipped}, "
+                f"emails removed {writer.emails_removed}")
+
+
+def suppression(path):
+    """--suppress value -> Suppression; with no flag, suppress.txt in the current folder is used when it exists."""
+    if path and not Path(path).is_file():
+        raise SystemExit(f"--suppress {path} not found")
+    return Suppression(path or ("suppress.txt" if Path("suppress.txt").is_file() else None))
+
+
 class LeadWriter:
     """Appends one lead per row and flushes each row, so a crash loses at most the lead in progress.
-    Resume: keys already in an existing file are loaded so callers can skip them before any paid call."""
+    Resume: keys already in an existing file are loaded so callers can skip them before any paid call.
+    suppress: a Suppression applied to every row before it is written (M14), whoever writes it."""
 
-    def __init__(self, path, columns, key):
-        self.path, self.columns, self.key = Path(path), columns, key
+    def __init__(self, path, columns, key, suppress=None):
+        self.path, self.columns, self.key, self.suppress = Path(path), columns, key, suppress
+        self.suppressed = self.emails_removed = 0
         self.seen = set()
         if self.path.exists() and self.path.stat().st_size:
             with open(self.path, newline="", encoding="utf-8-sig") as f:
@@ -349,7 +406,14 @@ class LeadWriter:
         return cell(key_value) in self.seen
 
     def write(self, lead):
-        """Write one lead dict. Returns False (and writes nothing) when its key is already in the file."""
+        """Write one lead dict. Returns False (and writes nothing) when its key is already in the file or the
+        suppression list drops it."""
+        if self.suppress:
+            keep, removed = self.suppress.apply(lead)
+            self.emails_removed += removed
+            if not keep:
+                self.suppressed += 1
+                return False
         row = {c: cell(lead.get(c)) for c in self.columns}
         if not row[self.key]:
             raise ValueError(f"lead has no {self.key}")

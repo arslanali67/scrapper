@@ -388,6 +388,34 @@ def test_enrich_paid_failure_not_cached():
     assert cache == {}  # a later lead with this domain may try again
 
 
+def test_suppression_list():  # M14
+    from pathlib import Path
+    from common import COMPANY_COLUMNS, LeadWriter, Suppression, suppression
+    f = Path(tempfile.mkdtemp()) / "suppress.txt"
+    f.write_text("# opted out\nAcme.com\nhttps://www.Beta.io/contact\n@gamma.org\nJo@Delta.com  # asked 2026-11-01\n\n")
+    s = Suppression(f)
+    assert (s.domains, s.emails, len(s)) == ({"acme.com", "beta.io", "gamma.org"}, {"jo@delta.com"}, 4)
+    assert s.blocks_domain("https://shop.acme.com/x") and not s.blocks_domain("notacme.com", "")
+    assert s.blocks_email("x@gamma.org") and s.blocks_email("JO@delta.com") and not s.blocks_email("al@delta.com")
+    lead = {"domain": "delta.com", "email": "jo@delta.com", "all_emails": ["jo@delta.com", "al@delta.com", "x@gamma.org"],
+            "email_status": "valid", "email_source": "website"}
+    assert s.apply(lead) == (True, 2)
+    assert (lead["email"], lead["all_emails"], lead["email_status"]) == ("al@delta.com", ["al@delta.com"], "")
+    assert s.apply({"domain": "", "website": "https://beta.io"}) == (False, 0)
+    out = Path(tempfile.mkdtemp()) / "c.csv"
+    with LeadWriter(out, COMPANY_COLUMNS, "source_url", s) as w:
+        assert not w.write({"source_url": "li/1", "company_name": "Acme", "domain": "acme.com"})
+        assert w.write({"source_url": "li/2", "company_name": "Delta", "domain": "delta.com", "email": "jo@delta.com"})
+    text = out.read_text(encoding="utf-8-sig")
+    assert "acme" not in text.lower() and "jo@delta.com" not in text and (w.suppressed, w.emails_removed) == (1, 1)
+    assert "leads dropped 1, emails removed 1" in s.summary(w) and Suppression().summary(w) == ""
+    try:
+        suppression(str(f) + ".missing")
+        raise AssertionError("expected SystemExit")
+    except SystemExit as e:
+        assert "not found" in str(e)
+
+
 def test_network_and_token_failures_stop_the_run():
     from common import StopRun, TregUnavailable, require
 

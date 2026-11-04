@@ -5,3 +5,4 @@ __pycache__/
 runs/
 samples/
 !data/*.csv
+suppress.txt

@@ -457,7 +457,7 @@ MODULES = [
          done="Pulling the network cable mid-run ends with a saved CSV and a readable summary."),
 
     dict(id="M14", title="Compliance & Suppression List", tag="CROSS-CUTTING \u00b7 P1", pri="P1",
-         state="Not designed yet",
+         state="Done (Nov 4): suppressed domains in 0 output CSVs",
          goal="Keep the lead lists usable legally: no opted-out contacts, sources recorded, data kept local.",
          used_by="Both scrapers",
          what=["Suppression list applied before writing.",
@@ -472,7 +472,12 @@ MODULES = [
               "Outreach to EU/UK contacts needs a documented lawful basis (GDPR); US email outreach must follow CAN-SPAM "
               "(identification + unsubscribe). Named personal emails are personal data; generic info@ addresses are "
               "lower risk.",
-              "CSV files stay on this machine and are git-ignored (M0)."],
+              "CSV files stay on this machine and are git-ignored (M0).",
+              f"Built: the list is applied inside the CSV writer, so no code path can write around it. With no flag, "
+              f"{c('suppress.txt')} in the current folder is used when it exists (git-ignored: it holds emails). Lines may "
+              f"be emails, domains, {c('@domain')} or URLs; subdomains match. A business or company whose domain is listed "
+              "is skipped before any paid lookup and does not count toward --limit. Not built: a phone-source column "
+              "(source_url traces each row), and rows already in a resumed file are not re-checked."],
          files="common.py (load_suppression) \u00b7 suppress.txt (user-maintained)",
          deps="none new",
          done="A domain in suppress.txt never appears in any output CSV."),

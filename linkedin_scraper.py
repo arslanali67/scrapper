@@ -25,7 +25,7 @@ from pathlib import Path
 
 from common import (COMPANY_COLUMNS, ENDPOINTS, PEOPLE_COLUMNS, LeadSpend, LeadWriter, StopRun, Treg, TregError,
                     cities_of, crawl_site, domain_of, email_status, enrich_calls, enrich_paid, estimate,
-                    normalize_phone, require, state_code, states)
+                    normalize_phone, require, state_code, states, suppression)
 
 require("people_search", "people_count", "serp", "people_enrich", "company_domain_from_linkedin", "company_by_name",
         "email_find_person", "email_find_person_fallback", "email_verify", "phone_find_person", "companies_search",
@@ -386,9 +386,10 @@ def find_contact(lead, treg, fallback=True, verify=False, phone=False):
     return lead
 
 
-def process(p, treg, titles, st, cache, search_query, contact=None):
+def process(p, treg, titles, st, cache, search_query, contact=None, suppress=None):
     """One discovered person -> (lead or None, reject reason, how the domain was found, micro-USD spent on them).
-    contact: find_contact options (fallback, verify, phone); None skips the email and phone lookups."""
+    contact: find_contact options (fallback, verify, phone); None skips the email and phone lookups. A company domain
+    on the suppression list skips them too (the writer then drops the row)."""
     spend = LeadSpend(treg)
     if p.get("source") == "xray":
         try:
@@ -403,7 +404,7 @@ def process(p, treg, titles, st, cache, search_query, contact=None):
     lead["domain"] = domain  # never the host of a LinkedIn or social link in the website field
     if domain and how != "website":
         lead["website"] = f"https://{domain}"
-    if contact is not None:
+    if contact is not None and not (suppress and suppress.blocks_domain(lead["domain"], lead["website"])):
         try:
             find_contact(lead, spend, **contact)
         except StopRun:
@@ -465,7 +466,7 @@ def _same_company(row, url):
                     normalize_company_url(row.get("url")).rsplit("/", 1)[-1]}
 
 
-def process_company(row, treg, domains, hunter, enrich=True, paid_emails=False, verify=False):
+def process_company(row, treg, domains, hunter, enrich=True, paid_emails=False, verify=False, suppress=None):
     """One company -> (lead, problem, micro-USD spent). An --input URL is looked up first; one the company database
     does not know keeps just its URL. A missing domain comes from the LinkedIn page (M10). Then, unless enrich is off,
     the M4 website scrape and M5 paid email / verify, as in the Google scraper."""
@@ -483,7 +484,7 @@ def process_company(row, treg, domains, hunter, enrich=True, paid_emails=False, 
         lead["domain"], _ = company_domain({"lastCompanyUrl": lead["source_url"], "lastCompanyName": lead["company_name"]},
                                            spend, domains)
         lead["website"] = lead["website"] or (f"https://{lead['domain']}" if lead["domain"] else "")
-    if enrich:
+    if enrich and not (suppress and suppress.blocks_domain(lead["domain"], lead["website"])):  # opted out
         try:
             site = crawl_site(lead["website"], treg=spend) if lead["website"] else \
                 {"emails": [], "phones": [], "error": "no website"}
@@ -574,6 +575,7 @@ def main(argv=None):
     ap.add_argument("--verify", action="store_true", help="verify each found email (up to $0.00124 each)")
     ap.add_argument("--phone", action="store_true", help="people: also look up each person's phone (misses free)")
     ap.add_argument("--paid-emails", action="store_true", help="company: Hunter lookup when the website shows no email")
+    ap.add_argument("--suppress", help="opt-out list: one email or domain per line (default: suppress.txt if present)")
     a = ap.parse_args(argv)
     company, titles = a.mode == "company", title_variants(a.role, a.titles)
     if company and not (a.input or a.keyword or a.industry or a.location):
@@ -598,6 +600,7 @@ def main(argv=None):
     if Path(out_path).exists() and Path(out_path).stat().st_size and not a.resume:
         sys.exit(f"{out_path} already exists: add --resume to continue it, or choose another --out")
 
+    sup = suppression(a.suppress)
     treg, what, ctrl_c = Treg(a.max_cost), "companies" if company else "people", "stopped with Ctrl+C"
     _, st = location_filter(a.location)
     contact = None if a.no_enrich else dict(fallback=not a.no_fallback, verify=a.verify, phone=a.phone)
@@ -607,7 +610,7 @@ def main(argv=None):
     rejects_path = treg.log_path.with_name(treg.log_path.stem + "-rejected.jsonl")
     columns, key = (COMPANY_COLUMNS, "source_url") if company else (PEOPLE_COLUMNS, "person_linkedin_url")
 
-    with LeadWriter(out_path, columns, key) as out, \
+    with LeadWriter(out_path, columns, key, sup) as out, \
             (nullcontext() if company else open(rejects_path, "a", encoding="utf-8")) as rejects:
         resumed, seen = len(out.seen), set(out.seen)  # rows already in the file are skipped before any lookup
         quota = max(0, a.limit - resumed)
@@ -624,9 +627,10 @@ def main(argv=None):
             rows = _pages(treg, build_query(titles, a.location, industry_names(a.industry), a.size), seen, stats,
                           need, label)
         if company:
-            work = lambda item: process_company(item[0], treg, cache, hunter, not a.no_enrich, a.paid_emails, a.verify)
+            work = lambda item: process_company(item[0], treg, cache, hunter, not a.no_enrich, a.paid_emails, a.verify,
+                                               sup)
         else:
-            work = lambda item: process(item[0], treg, titles, st, cache, item[2], contact)
+            work = lambda item: process(item[0], treg, titles, st, cache, item[2], contact, sup)
         pool = ThreadPoolExecutor(WORKERS)
 
         def cancel():
@@ -734,6 +738,8 @@ def main(argv=None):
         print("  problems: " + ", ".join(f"{k} x{v}" for k, v in problems.most_common()))
     print(f"  spent ${treg.spent_usd:.4f}" + (f" (${treg.spent_usd / n:.5f} per row)" if n else "")
           + f" | run log {treg.log_path}" + ("" if company else f" | dropped people {rejects_path}"))
+    if sup.summary(out):
+        print(sup.summary(out))
     if treg.failures():
         print(treg.failures())
     if stop:

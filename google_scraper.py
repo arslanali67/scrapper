@@ -17,7 +17,7 @@ from pathlib import Path
 
 from common import (ENDPOINTS, GOOGLE_COLUMNS, LeadSpend, LeadWriter, StopRun, Treg, TregError, cities_of, crawl_site,
                     domain_of, enrich_calls, enrich_paid, estimate, normalize_phone, require, state_code, states,
-                    zip_state, zips_of)
+                    suppression, zip_state, zips_of)
 
 require("maps_search", "web_extract", "company_emails_by_domain", "email_verify")
 
@@ -131,6 +131,7 @@ def main(argv=None):
     ap.add_argument("--min-rating", type=float, default=0.0)
     ap.add_argument("--min-reviews", type=int, default=0)
     ap.add_argument("--require-website", action="store_true", help="keep only businesses with a website")
+    ap.add_argument("--suppress", help="opt-out list: one email or domain per line (default: suppress.txt if present)")
     a = ap.parse_args(argv)
     if a.no_enrich and (a.paid_emails or a.verify):
         ap.error("--no-enrich cannot be combined with --paid-emails or --verify")
@@ -151,10 +152,11 @@ def main(argv=None):
     if Path(a.out).exists() and Path(a.out).stat().st_size and not a.resume:
         sys.exit(f"{a.out} already exists: add --resume to continue it, or choose another --out")
 
+    sup = suppression(a.suppress)
     treg = Treg(a.max_cost)
     stats, site_errors, area = Counter(), Counter(), Counter()
     stop, cache, taken = "", {}, set()
-    with LeadWriter(a.out, GOOGLE_COLUMNS, "place_id") as out:
+    with LeadWriter(a.out, GOOGLE_COLUMNS, "place_id", sup) as out:
         resumed, quota = len(out.seen), max(0, a.limit - len(out.seen))
         searches, enrichers = ThreadPoolExecutor(SEARCH_WORKERS), ThreadPoolExecutor(WORKERS)
         pending = {}  # future -> ("search", cell) | ("enrich", (lead, search_share_micro))
@@ -222,6 +224,8 @@ def main(argv=None):
                     stats["outside"] += 1  # Maps results bleed across state lines
                 elif not passes(lead, a.min_rating, a.min_reviews, a.require_website):
                     stats["filtered"] += 1
+                elif sup.blocks_domain(lead["domain"], lead["website"]):
+                    stats["suppressed"] += 1  # opted out: not counted toward --limit, no paid lookups
                 else:
                     new.append(lead)
                     taken.add(lead["place_id"])
@@ -284,6 +288,8 @@ def main(argv=None):
         print("  websites not read: " + ", ".join(f"{k} x{v}" for k, v in site_errors.most_common()))
     print(f"  spent ${treg.spent_usd:.4f}" + (f" (${treg.spent_usd / n:.5f} per lead)" if n else "")
           + f" | run log {treg.log_path}")
+    if sup.summary(out, stats["suppressed"]):
+        print(sup.summary(out, stats["suppressed"]))
     if treg.failures():
         print(treg.failures())
     if stop:

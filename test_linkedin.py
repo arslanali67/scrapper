@@ -315,6 +315,17 @@ def test_network_drop_mid_run_keeps_csv_and_summary():  # M13 "pull the network 
     assert "stopped early: cannot reach treg" in buf.getvalue() and "treg calls failed: unreachable" in buf.getvalue()
 
 
+def test_suppression_drops_company_and_email():  # M14
+    sup = Path(tempfile.mkdtemp()) / "suppress.txt"
+    sup.write_text("co3.com\nb@co.com\n")
+    rows, t = run("--role", "HR", "--location", "Texas", "--limit", "10", "--suppress", str(sup))
+    gone = "https://www.linkedin.com/in/person-3"
+    assert len(rows) == 10 and gone not in {r["person_linkedin_url"] for r in rows}
+    assert all(r["domain"] != "co3.com" for r in rows)
+    assert gone not in {p["person_linkedin_url"] for c, p in t.calls if c == "email_find_person"}  # no paid lookup
+    assert all(r["email"] in ("a@co.com", "") for r in rows) and any(r["email"] == "" for r in rows)  # b@co.com removed
+
+
 def test_dry_run_spends_nothing():  # L-A3
     t = Fake(people_count=lambda p: {"total": 7760}, companies_count=lambda p: {"total": 2081})
     ls.Treg = lambda max_cost: t

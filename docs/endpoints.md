@@ -110,6 +110,10 @@ Chosen IDs, caps and example params are in [`endpoints.json`](../endpoints.json)
   Not covered: Google leads whose website crawl was running when the network dropped are written without website
   data (the crawl cannot tell a dead network from a dead site).
 
+- **M14 suppression** (2026-11-04): a list of 2 dentist domains and 1 company domain. Google "dentists" in Austin,
+  `--limit 10`: 10 leads written, 2 dropped, 0 suppressed domains in the file. Company mode, the 20 M12 URLs: 19 rows,
+  the listed company dropped before its website was scraped. $0.0077 in total.
+
 ## Not measured yet
 
 - Per-query depth limit of the X-ray search beyond one query (76 rows at limit 100).

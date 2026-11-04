@@ -99,6 +99,19 @@ def fake_crawl(log, fail_from=None):
     return crawl
 
 
+def test_suppressed_domain_never_written_nor_crawled():  # M14
+    crawled = []
+    gs.Treg = lambda max_cost: FakeTreg(places(4))
+    gs.crawl_site = fake_crawl(crawled)
+    sup = Path(tempfile.mkdtemp()) / "suppress.txt"
+    sup.write_text("biz1.com\ninfo@biz2.com\n")
+    out = Path(tempfile.mkdtemp()) / "g.csv"
+    gs.main(["--query", "dentists", "--location", "Austin, TX", "--limit", "3", "--suppress", str(sup), "--out", str(out)])
+    got = {r["place_id"]: r for r in read(out)}
+    assert sorted(got) == ["P0", "P2", "P3"]  # --limit 3 still filled: the opted-out place does not count and 1 not in crawled  # opted-out business: no row, no crawl
+    assert got["P2"]["email"] == "" and "biz1.com" not in out.read_text(encoding="utf-8-sig")
+
+
 def test_dry_run_spends_nothing():
     def no_treg(*a, **k):
         raise AssertionError("dry run must not create a treg client")
