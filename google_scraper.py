@@ -8,17 +8,16 @@ A state is searched city by city (largest first); a city whose search hits the 1
 ZIP code by ZIP code. M6 search + mapping, M7 enrichment / dry-run / resume / summary, M8 area coverage.
 """
 import argparse
-import csv
 import re
 import sys
 from collections import Counter, deque
 from concurrent.futures import FIRST_COMPLETED, CancelledError, ThreadPoolExecutor, wait
 from datetime import datetime
-from functools import lru_cache
 from pathlib import Path
 
-from common import (ENDPOINTS, GOOGLE_COLUMNS, ROOT, BudgetReached, LeadSpend, LeadWriter, OutOfBalance, Treg,
-                    TregError, crawl_site, domain_of, enrich_paid, estimate, normalize_phone)
+from common import (ENDPOINTS, GOOGLE_COLUMNS, BudgetReached, LeadSpend, LeadWriter, OutOfBalance, Treg, TregError,
+                    cities_of, crawl_site, domain_of, enrich_paid, estimate, normalize_phone, state_code, states,
+                    zip_state, zips_of)
 
 ROWS_CAP = ENDPOINTS["maps_search"]["rows_cap"]  # one search never returns more (M1): a full cell is "saturated"
 # "..., Austin, TX 78704" or "..., Austin, TX 78704, United States"
@@ -36,45 +35,6 @@ SECONDS_PER_SEARCH = 35   # for the dry-run time estimate
 
 
 # ---------------------------------------------------------------- area planning (M8)
-def _rows(name):
-    with open(ROOT / "data" / name, newline="", encoding="utf-8") as f:
-        return list(csv.DictReader(f))
-
-
-@lru_cache(None)
-def states():
-    """{'TX': 'Texas', ...} from data/us_states.csv (GeoNames)."""
-    return {r["code"]: r["name"] for r in _rows("us_states.csv")}
-
-
-def state_code(text):
-    """'TX', 'tx' or 'Texas' -> 'TX'; None if it is not a US state."""
-    t = (text or "").strip()
-    return t.upper() if t.upper() in states() else next((c for c, n in states().items() if n.lower() == t.lower()), None)
-
-
-@lru_cache(None)
-def _cities_by_state():
-    out = {}
-    for r in _rows("us_cities.csv"):  # already sorted by state, largest first
-        out.setdefault(r["state"], []).append((r["city"], int(r["population"])))
-    return out
-
-
-@lru_cache(None)
-def _zips_by_city():
-    out = {}
-    for r in _rows("us_zips.csv"):
-        out.setdefault((r["city"].lower(), r["state"]), []).append(r["zip"])
-        out.setdefault(("", r["state"]), []).append(r["zip"])  # every ZIP of the state
-        out[("#", r["zip"])] = [r["state"]]
-    return out
-
-
-def zips_of(city, state):
-    return _zips_by_city().get(((city or "").lower(), state), [])
-
-
 def plan_area(location=None, split="auto", min_population=5000, locations_file=None):
     """-> (cells, state). A cell is {'cell': text for the Maps search, 'kind': city|zip|state|free, 'city', 'state'}.
     state: the requested US state (places outside it are dropped), or None."""
@@ -89,9 +49,9 @@ def plan_area(location=None, split="auto", min_population=5000, locations_file=N
         if split == "zips":
             return [{"cell": f"{z}, {st}", "kind": "zip", "city": "", "state": st} for z in zips_of("", st)], st
         return [{"cell": f"{c}, {st}", "kind": "city", "city": c, "state": st}
-                for c, pop in _cities_by_state().get(st, []) if pop >= min_population], st
+                for c, pop in cities_of(st) if pop >= min_population], st
     if re.fullmatch(r"\d{5}", s):
-        st = (_zips_by_city().get(("#", s)) or [""])[0]
+        st = zip_state(s)
         return [{"cell": f"{s}, {st}" if st else s, "kind": "zip", "city": "", "state": st}], st or None
     m = re.fullmatch(r"(.+?),\s*([A-Za-z .]+)", s)
     if m and state_code(m.group(2)):

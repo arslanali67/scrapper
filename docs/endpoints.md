@@ -53,6 +53,11 @@ Chosen IDs, caps and example params are in [`endpoints.json`](../endpoints.json)
   searches (4 cities, all full, re-searched by 24 ZIP codes) in 36 s for $0.0042. Vermont: one statewide search
   stops at 100; the city split found **377** (3.8x) from 22 searches for $0.0033, dropping 52 from other states.
 
+- **M9 people discovery** (2026-11-04): HR titles x tech industries x `profileLocation` Texas -> 7,760 matches;
+  100 rows for $0.038, all 100 unique, in Texas, HR-type title, with company name, website and size.
+  X-ray fallback: one query -> 30 unique profiles for $0.0015 with name 30/30, title 29/30, but company only 3/30
+  and no website, so X-ray rows need M10's lookup.
+
 ## Not measured yet
 
 - Per-query depth limit of the X-ray search beyond one query (76 rows at limit 100).

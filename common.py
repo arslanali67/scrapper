@@ -6,6 +6,7 @@ import re
 import threading
 import time
 from datetime import datetime
+from functools import lru_cache
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote, urljoin, urlparse
@@ -151,6 +152,56 @@ class LeadSpend:
 def estimate(calls):
     """Dry-run cost in USD: {capability: expected number of calls} x price_usd from endpoints.json."""
     return sum(ENDPOINTS[cap]["price_usd"] * n for cap, n in calls.items())
+
+
+# ---------------------------------------------------------------- US area data (M8, used by both scrapers)
+def _rows(name):
+    with open(ROOT / "data" / name, newline="", encoding="utf-8") as f:
+        return list(csv.DictReader(f))
+
+
+@lru_cache(None)
+def states():
+    """{'TX': 'Texas', ...} from data/us_states.csv (GeoNames)."""
+    return {r["code"]: r["name"] for r in _rows("us_states.csv")}
+
+
+def state_code(text):
+    """'TX', 'tx' or 'Texas' -> 'TX'; None if it is not a US state."""
+    t = (text or "").strip()
+    return t.upper() if t.upper() in states() else next((c for c, n in states().items() if n.lower() == t.lower()), None)
+
+
+@lru_cache(None)
+def _cities_by_state():
+    out = {}
+    for r in _rows("us_cities.csv"):  # already sorted by state, largest first
+        out.setdefault(r["state"], []).append((r["city"], int(r["population"])))
+    return out
+
+
+@lru_cache(None)
+def _zips_by_city():
+    out = {}
+    for r in _rows("us_zips.csv"):
+        out.setdefault((r["city"].lower(), r["state"]), []).append(r["zip"])
+        out.setdefault(("", r["state"]), []).append(r["zip"])  # every ZIP of the state
+        out[("#", r["zip"])] = [r["state"]]
+    return out
+
+
+def zips_of(city, state):
+    return _zips_by_city().get(((city or "").lower(), state), [])
+
+
+def cities_of(state):
+    """[(city, population), ...] of a state, largest first."""
+    return _cities_by_state().get(state, [])
+
+
+def zip_state(zipcode):
+    """'78704' -> 'TX'; '' when unknown."""
+    return (_zips_by_city().get(("#", zipcode)) or [""])[0]
 
 
 # ---------------------------------------------------------------- lead CSV (M3)

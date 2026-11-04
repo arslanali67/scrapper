@@ -321,7 +321,7 @@ MODULES = [
 
     # ---------------- LinkedIn
     dict(id="M9", title="People Discovery (Search + X-Ray Fallback)", tag="PHASE 3 · P0", pri="P0",
-         state="Does not exist (source chosen in M1)",
+         state="Done (Nov 4): 100/100 in Texas, HR title, website",
          goal="Turn &quot;HR people at tech companies in Texas&quot; into people with LinkedIn URL, current title, company and "
               "company website, using a people-database search through treg (no LinkedIn login). M1 measured it at "
               "7,532 matches for this example, 20/20 in Texas. Google X-ray search is the fallback.",
