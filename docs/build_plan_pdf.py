@@ -434,7 +434,7 @@ MODULES = [
 
     # ---------------- cross-cutting
     dict(id="M13", title="Errors, Logging & Run Summary", tag="CROSS-CUTTING \u00b7 P1", pri="P1",
-         state="No error handling exists yet",
+         state="Done (Nov 4): network drop -> saved CSV + one-line summary",
          goal="Make every failure visible and safe: a bad website or a provider outage loses one lead, never the run.",
          used_by="Both scrapers",
          what=["One clear message per failure type.",
@@ -446,7 +446,12 @@ MODULES = [
               f"Missing {c('TREG_TOKEN')} or an unknown capability in endpoints.json fails at start-up with one line "
               "telling the user what to fix.",
               f"The JSONL run log (M2) plus an {c('errors')} count in the summary is all the logging needed; no logging "
-              "framework."],
+              "framework.",
+              f"Built: every stop reason is a {c('StopRun')} (budget, empty balance, treg unreachable, token rejected). "
+              "The run ends with the CSV saved and a summary; rows in progress are dropped, not written half-empty, so "
+              f"{c('--resume')} redoes them. Before M13 a network drop was a per-lead error, so people were written "
+              "without emails and resume never looked them up again. Failed calls are counted by status in the "
+              f"summary; unexpected errors go to the run log with the lead key and file:line ({c('Treg.note')})."],
          files="common.py \u00b7 both scrapers",
          deps="none new",
          done="Pulling the network cable mid-run ends with a saved CSV and a readable summary."),

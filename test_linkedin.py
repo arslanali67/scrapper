@@ -64,11 +64,17 @@ class Fake:
     """Answers per capability from a dict of functions; records calls."""
 
     def __init__(self, **answers):
-        self.answers, self.calls, self.spent_micro = answers, [], 0
+        self.answers, self.calls, self.spent_micro, self.notes = answers, [], 0, []
 
     @property
     def spent_usd(self):
         return self.spent_micro / 1e6
+
+    def note(self, key, error):
+        self.notes.append((key, type(error).__name__))
+
+    def failures(self):
+        return ""
 
     def call(self, capability, params=None, tally=None, max_cost=None):
         self.calls.append((capability, params))
@@ -154,6 +160,11 @@ def test_process_never_uses_a_linkedin_link_as_domain():
     assert lead["domain"] == ""  # not "linkedin.com"
     lead, *_ = ls.process(p, t, HR, "TX", {}, "q", None)  # --no-enrich: no email lookup at all
     assert "email_find_person" not in [c for c, _ in t.calls[3:]]
+    odd = Fake(company_domain_from_linkedin=lambda q: {"found": False}, company_by_name=lambda q: {},
+               email_find_person=lambda q: ["not", "a", "dict"])  # an odd provider answer: keep the person, log it
+    lead, problem, _, _ = ls.process(p, odd, HR, "TX", {}, "q", {"fallback": False})
+    assert lead["full_name"] == "First1 Last1" and problem == "email lookup failed (AttributeError)"
+    assert odd.notes == [(lead["person_linkedin_url"], "AttributeError")]
 
 
 class PagedTreg(Fake):
@@ -274,6 +285,34 @@ def test_ctrl_c_writes_everyone_already_looked_up():
     looked = {p["person_linkedin_url"] for c, p in t.calls if c == "email_find_person"}
     # queued people are cancelled before any lookup; everyone already looked up is written, none thrown away
     assert 90 <= len(rows) <= 100 and looked == {r["person_linkedin_url"] for r in rows}
+
+
+def test_network_drop_mid_run_keeps_csv_and_summary():  # M13 "pull the network cable"
+    import httpx
+    import json as _json
+    import common
+    common.Treg.RETRY_DELAYS = (0, 0, 0)
+    sent = []
+
+    def handler(req):
+        sent.append(req.url.path)
+        if len(sent) > 40:
+            raise httpx.ConnectError("network is down", request=req)
+        ep, body = req.url.path.rsplit("/", 1)[1], _json.loads(req.content)
+        if ep == "icypeas.people.search":
+            n = len([p for p in sent if p.endswith("icypeas.people.search")])
+            leads = [person(n * 1000 + i) for i in range(body["pagination"]["size"])]
+            return httpx.Response(200, json={"total": 5000, "leads": leads, "pagination": {"token": f"t{n}"}})
+        return httpx.Response(200, json={"found": True, "email": "a@co.com"})  # tier 1 always hits
+    out = Path(tempfile.mkdtemp()) / "p.csv"
+    ls.Treg = lambda max_cost: common.Treg(max_cost, log_dir=tempfile.mkdtemp(),
+                                            transport=httpx.MockTransport(handler), token="t")
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        ls.main(["--role", "HR", "--location", "Texas", "--limit", "200", "--out", str(out)])  # no traceback
+    rows = list(csv.DictReader(open(out, newline="", encoding="utf-8-sig")))
+    assert 0 < len(rows) < 200 and all(r["email"] == "a@co.com" for r in rows)  # nobody written half-looked-up
+    assert "stopped early: cannot reach treg" in buf.getvalue() and "treg calls failed: unreachable" in buf.getvalue()
 
 
 def test_dry_run_spends_nothing():  # L-A3

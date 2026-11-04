@@ -103,6 +103,13 @@ Chosen IDs, caps and example params are in [`endpoints.json`](../endpoints.json)
     a small `--max-cost` run early. `Treg` now waits for calls in flight to settle and stops only when the next call
     cannot fit even then.
 
+- **M13 failures** (2026-11-04): with all traffic sent to a dead proxy, both scrapers end in seconds with exit code 0,
+  the CSV saved, a summary and one line: "cannot reach treg (ConnectError): check the network, then rerun with
+  --resume". A bad token (HTTP 401) stops the run with "check TREG_TOKEN in .env"; a broken endpoints.json is one line
+  at start-up. Offline, a network drop after 40 calls mid-run keeps only fully looked-up people in the CSV.
+  Not covered: Google leads whose website crawl was running when the network dropped are written without website
+  data (the crawl cannot tell a dead network from a dead site).
+
 ## Not measured yet
 
 - Per-query depth limit of the X-ray search beyond one query (76 rows at limit 100).

@@ -5,6 +5,7 @@ import tempfile
 from pathlib import Path
 
 import google_scraper as gs
+from common import BudgetReached
 
 RAW = {"name": "ATX Family Dental", "place_id": "ChIJ1", "url": "https://maps.google.com/?cid=1",
        "address": "1700 S 1st St, Austin, TX 78704", "phone": "(512) 717-3147", "website": "https://www.atxfamilydental.com/",
@@ -35,12 +36,18 @@ class FakeTreg:
     """Maps search costs 150 micro-USD; any other capability costs 1000 and returns {}."""
 
     def __init__(self, rows):
-        self.rows, self.spent_micro, self.calls = rows, 0, []
+        self.rows, self.spent_micro, self.calls, self.notes = rows, 0, [], []
         self.log_path = Path(tempfile.mkdtemp()) / "log.jsonl"
 
     @property
     def spent_usd(self):
         return self.spent_micro / 1e6
+
+    def note(self, key, error):
+        self.notes.append((key, type(error).__name__))
+
+    def failures(self):
+        return ""
 
     def call(self, capability, params, tally=None, max_cost=None):
         self.calls.append((capability, params))
@@ -85,7 +92,7 @@ def fake_crawl(log, fail_from=None):
         i = int(re.search(r"\d+", url).group())
         log.append(i)
         if fail_from is not None and i >= fail_from:
-            raise gs.BudgetReached("budget reached")
+            raise BudgetReached("budget reached")
         treg.call("web_extract", {"url": url})
         return {"emails": [f"info@biz{i}.com"], "phones": ["+1 512-474-1234"], "facebook": f"https://facebook.com/biz{i}",
                 "services": ["Implants", "Crowns"], "error": ""}

@@ -15,9 +15,11 @@ from concurrent.futures import FIRST_COMPLETED, CancelledError, ThreadPoolExecut
 from datetime import datetime
 from pathlib import Path
 
-from common import (ENDPOINTS, GOOGLE_COLUMNS, BudgetReached, LeadSpend, LeadWriter, OutOfBalance, Treg, TregError,
-                    cities_of, crawl_site, domain_of, enrich_calls, enrich_paid, estimate, normalize_phone, state_code,
-                    states, zip_state, zips_of)
+from common import (ENDPOINTS, GOOGLE_COLUMNS, LeadSpend, LeadWriter, StopRun, Treg, TregError, cities_of, crawl_site,
+                    domain_of, enrich_calls, enrich_paid, estimate, normalize_phone, require, state_code, states,
+                    zip_state, zips_of)
+
+require("maps_search", "web_extract", "company_emails_by_domain", "email_verify")
 
 ROWS_CAP = ENDPOINTS["maps_search"]["rows_cap"]  # one search never returns more (M1): a full cell is "saturated"
 # "..., Austin, TX 78704" or "..., Austin, TX 78704, United States"
@@ -190,11 +192,13 @@ def main(argv=None):
             nonlocal stop
             try:
                 rows, saturated, micro = f.result()
-            except (BudgetReached, OutOfBalance) as e:
+            except StopRun as e:
                 stop = stop or str(e)
                 return cancel()
-            except TregError:
+            except Exception as e:  # TregError: provider out for this cell; anything else is logged too
                 area["failed"] += 1
+                if not isinstance(e, TregError):
+                    treg.note(cell["cell"], e)
                 return
             area["searched"] += 1
             area[cell["kind"] + "_cells"] += 1
@@ -234,27 +238,34 @@ def main(argv=None):
             lead, share = item
             try:
                 lead, err, spent = f.result()
-            except (BudgetReached, OutOfBalance) as e:
-                stop = stop or str(e)
+            except StopRun as e:
+                stop = stop or str(e)  # this lead is dropped unwritten, so --resume redoes it
                 return cancel()
             except Exception as e:  # a bug or odd site must not lose the lead: keep its Maps data
                 err, spent = f"enrichment failed ({type(e).__name__})", 0
+                treg.note(lead["place_id"], e)
             if err:
                 site_errors[re.sub(r" \(.*", "", err)] += 1
             write(lead, share, spent)
 
+        ctrl_c = "stopped with Ctrl+C"
         try:
-            start_searches()
-            while pending:
-                done, _ = wait(list(pending), return_when=FIRST_COMPLETED)
-                for f in done:
-                    kind, item = pending.pop(f)
-                    if not f.cancelled():
-                        (on_search if kind == "search" else on_enrich)(item, f)
-                start_searches()
-        except KeyboardInterrupt:
-            stop = "stopped with Ctrl+C"
-            cancel()
+            while True:
+                try:
+                    start_searches()
+                    if not pending:
+                        break
+                    done, _ = wait(list(pending), return_when=FIRST_COMPLETED)
+                    for f in done:
+                        kind, item = pending.pop(f)
+                        if not f.cancelled():
+                            (on_search if kind == "search" else on_enrich)(item, f)
+                except KeyboardInterrupt:
+                    if stop == ctrl_c:
+                        raise
+                    stop = ctrl_c
+                    cancel()
+                    print("  Ctrl+C: finishing the leads in progress, then stopping (Ctrl+C again quits)")
         finally:
             searches.shutdown(wait=True, cancel_futures=True)
             enrichers.shutdown(wait=True, cancel_futures=True)
@@ -273,6 +284,8 @@ def main(argv=None):
         print("  websites not read: " + ", ".join(f"{k} x{v}" for k, v in site_errors.most_common()))
     print(f"  spent ${treg.spent_usd:.4f}" + (f" (${treg.spent_usd / n:.5f} per lead)" if n else "")
           + f" | run log {treg.log_path}")
+    if treg.failures():
+        print(treg.failures())
     if stop:
         print(f"  stopped early: {stop}")
 

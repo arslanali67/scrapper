@@ -5,6 +5,8 @@ import os
 import re
 import threading
 import time
+import traceback
+from collections import Counter
 from datetime import datetime
 from functools import lru_cache
 from html.parser import HTMLParser
@@ -16,7 +18,29 @@ import httpx
 import phonenumbers
 
 ROOT = Path(__file__).parent
-ENDPOINTS = json.loads((ROOT / "endpoints.json").read_text(encoding="utf-8"))
+
+
+def _load_endpoints():
+    """endpoints.json, checked once at start-up: a broken file is one line telling what to fix, not a traceback."""
+    try:
+        eps = json.loads((ROOT / "endpoints.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise SystemExit(f"endpoints.json cannot be read ({e}); restore it from git")
+    bad = [k for k, v in eps.items() if not k.startswith("_")
+           and not all(f in v for f in ("id", "method", "price_usd", "max_cost_usd"))]
+    if bad:
+        raise SystemExit(f"endpoints.json: {', '.join(bad)} need id, method, price_usd and max_cost_usd")
+    return eps
+
+
+ENDPOINTS = _load_endpoints()
+
+
+def require(*capabilities):
+    """Start-up check of the capabilities a scraper uses: a missing one is one line, before anything is spent."""
+    missing = [c for c in capabilities if c not in ENDPOINTS]
+    if missing:
+        raise SystemExit(f"endpoints.json has no {', '.join(missing)}; restore it from git")
 
 
 class TregError(Exception):
@@ -27,12 +51,21 @@ class TregError(Exception):
         self.status = status
 
 
-class BudgetReached(Exception):
-    """The next call could push spend past --max-cost. Stop the run cleanly."""
+class StopRun(Exception):
+    """The run cannot go on. Stop cleanly: rows written so far stay, rows in progress are dropped so --resume
+    redoes them, never written half-empty."""
 
 
-class OutOfBalance(Exception):
-    """treg balance is empty (402). Stop the run; the message holds the top-up URL."""
+class BudgetReached(StopRun):
+    """The next call could push spend past --max-cost."""
+
+
+class OutOfBalance(StopRun):
+    """treg balance is empty (402); the message holds the top-up URL."""
+
+
+class TregUnavailable(StopRun):
+    """treg cannot be reached (network down) or rejects the token."""
 
 
 def load_token():
@@ -59,6 +92,7 @@ class Treg:
         self.log_path = Path(log_dir) / f"{datetime.now():%Y%m%d-%H%M%S}.jsonl"
         self._lock = threading.Lock()
         self._settled = threading.Condition(self._lock)  # notified whenever a call in flight settles
+        self.failed = Counter()  # failed calls by status, for the run summary
         self._reserved = 0  # worst-case cost of calls in flight
         self._unsettled = 0  # timed-out calls: may still bill server-side, so their cap stays counted
 
@@ -100,15 +134,19 @@ class Treg:
                 r = self.client.request(ep["method"], f"/call/{ep['id']}", **req)
             except httpx.ConnectError as e:  # nothing reached treg, safe to retry
                 if delay is None:
-                    raise TregError(f"{capability}: cannot reach treg ({e})")
+                    self._log(capability, ep["id"], "unreachable", 0, None, t0)
+                    raise TregUnavailable(f"cannot reach treg ({type(e).__name__}): check the network, then "
+                                          "rerun with --resume")
                 time.sleep(delay)
                 continue
-            except httpx.TimeoutException:
-                # The call may still finish (and bill) server-side, so never retry it, and keep its cap counted.
+            except httpx.TransportError as e:
+                # Timed out or cut off after sending: the call may still finish (and bill) server-side, so never
+                # retry it, and keep its cap counted.
                 with self._lock:
                     self._unsettled += cap_micro
-                self._log(capability, ep["id"], "timeout", 0, None, t0)
-                raise TregError(f"{capability}: timed out")
+                status = "timeout" if isinstance(e, httpx.TimeoutException) else "cut off"
+                self._log(capability, ep["id"], status, 0, None, t0)
+                raise TregError(f"{capability}: {status} ({type(e).__name__})")
             if (r.status_code == 429 or r.status_code >= 500) and r.status_code not in (502, 503) and delay is not None:
                 time.sleep(delay)
                 continue
@@ -132,14 +170,33 @@ class Treg:
         if r.status_code == 402 and err != "route_max_cost":
             topup = detail.get("topup_url", "") if isinstance(detail, dict) else ""
             raise OutOfBalance(f"treg balance is empty. Top up: {topup or 'treg topup'}")
+        if r.status_code == 401:
+            raise TregUnavailable("treg rejected the token (HTTP 401): check TREG_TOKEN in .env")
         # 502 too large, 503 provider out, 402 route_max_cost, 4xx bad input: not charged / skip lead.
         raise TregError(f"{capability}: HTTP {r.status_code} {str(detail)[:200]}", r.status_code)
 
     def _log(self, capability, endpoint, status, cost, served_by, t0):
         rec = {"ts": datetime.now().isoformat(timespec="seconds"), "capability": capability, "endpoint": endpoint,
                "status": status, "cost_micro": cost, "served_by": served_by, "secs": round(time.time() - t0, 1)}
+        self._write(rec, failed=status if not (isinstance(status, int) and status < 400) else None)
+
+    def note(self, key, error):
+        """Log a lead's unexpected error (with where it happened) in the run log; the summary counts it."""
+        where = traceback.extract_tb(error.__traceback__)[-1] if error.__traceback__ else None
+        self._write({"ts": datetime.now().isoformat(timespec="seconds"), "event": "lead error", "key": key,
+                     "error": f"{type(error).__name__}: {str(error)[:300]}",
+                     "where": f"{Path(where.filename).name}:{where.lineno}" if where else ""}, failed=None)
+
+    def _write(self, rec, failed):
         with self._lock, open(self.log_path, "a", encoding="utf-8") as f:  # one whole line per call, even in parallel
             f.write(json.dumps(rec) + "\n")
+            if failed is not None:
+                self.failed[str(failed)] += 1
+
+    def failures(self):
+        """'' or one summary line: failed treg calls by status (each one is in the run log)."""
+        return ("  treg calls failed: " + ", ".join(f"{k} x{v}" for k, v in self.failed.most_common())
+                + " (per call in the run log)") if self.failed else ""
 
 
 class LeadSpend:

@@ -388,6 +388,56 @@ def test_enrich_paid_failure_not_cached():
     assert cache == {}  # a later lead with this domain may try again
 
 
+def test_network_and_token_failures_stop_the_run():
+    from common import StopRun, TregUnavailable, require
+
+    def down(req):
+        raise httpx.ConnectError("no route", request=req)
+    t = treg(down)
+    try:
+        t.call("maps_search", {})
+        raise AssertionError("expected TregUnavailable")
+    except TregUnavailable as e:  # a StopRun, not a per-lead TregError that would write rows without emails
+        assert isinstance(e, StopRun) and not isinstance(e, TregError) and "--resume" in str(e)
+
+    def cut(req):
+        raise httpx.ReadError("connection reset", request=req)
+    t = treg(cut, budget=0.003)
+    try:
+        t.call("maps_search", {})
+        raise AssertionError("expected TregError")
+    except TregError as e:
+        assert "cut off" in str(e)
+    try:  # cut off after sending: it may still bill, so its cap stays counted (2000 + 2000 > 3000)
+        t.call("maps_search", {})
+        raise AssertionError("expected BudgetReached")
+    except BudgetReached:
+        pass
+    try:
+        treg(lambda req: reply(401, {"detail": "bad token"})).call("maps_search", {})
+        raise AssertionError("expected TregUnavailable")
+    except TregUnavailable as e:
+        assert "TREG_TOKEN" in str(e)
+    t = treg(lambda req: reply(503, {"detail": "provider out"}))
+    for _ in range(2):
+        try:
+            t.call("maps_search", {})
+        except TregError:
+            pass
+    try:
+        raise ValueError("odd answer")
+    except ValueError as e:
+        t.note("lead-1", e)
+    lines = [json.loads(l) for l in t.log_path.read_text().splitlines()]
+    assert lines[-1]["key"] == "lead-1" and lines[-1]["where"].startswith("test_common.py:")
+    assert t.failures().startswith("  treg calls failed: 503 x2")
+    try:
+        require("maps_search", "no_such_capability")
+        raise AssertionError("expected SystemExit")
+    except SystemExit as e:
+        assert "no_such_capability" in str(e)
+
+
 if __name__ == "__main__":
     tests = [f for name, f in sorted(globals().items()) if name.startswith("test_")]
     for f in tests:

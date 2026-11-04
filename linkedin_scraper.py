@@ -23,9 +23,13 @@ from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 
-from common import (COMPANY_COLUMNS, ENDPOINTS, PEOPLE_COLUMNS, BudgetReached, LeadSpend, LeadWriter, OutOfBalance,
-                    Treg, TregError, cities_of, crawl_site, domain_of, email_status, enrich_calls, enrich_paid,
-                    estimate, normalize_phone, state_code, states)
+from common import (COMPANY_COLUMNS, ENDPOINTS, PEOPLE_COLUMNS, LeadSpend, LeadWriter, StopRun, Treg, TregError,
+                    cities_of, crawl_site, domain_of, email_status, enrich_calls, enrich_paid, estimate,
+                    normalize_phone, require, state_code, states)
+
+require("people_search", "people_count", "serp", "people_enrich", "company_domain_from_linkedin", "company_by_name",
+        "email_find_person", "email_find_person_fallback", "email_verify", "phone_find_person", "companies_search",
+        "companies_count", "web_extract", "company_emails_by_domain")
 
 # Job-title variants per role; --titles overrides. Unknown roles are searched as written.
 ROLE_TITLES = {
@@ -342,7 +346,7 @@ def find_contact(lead, treg, fallback=True, verify=False, phone=False):
     """M11: the person's work email (and phone) from email-finder providers, never a guessed address.
     Tier 1: blitzapi by LinkedIn URL ($0.000495 per hit, misses free). Tier 2, tier-1 misses only: treg's routed
     finder by URL, name and domain, capped, per-hit providers only (see endpoints.json). With verify, a bounced
-    address counts as a miss. TregError skips a step; BudgetReached / OutOfBalance propagate and stop the run."""
+    address counts as a miss. TregError skips a step; StopRun (budget, balance, treg unreachable) propagates and stops the run."""
     url = lead["person_linkedin_url"]
     tiers = [("email_find_person", {"person_linkedin_url": url})]
     if fallback:
@@ -400,7 +404,13 @@ def process(p, treg, titles, st, cache, search_query, contact=None):
     if domain and how != "website":
         lead["website"] = f"https://{domain}"
     if contact is not None:
-        find_contact(lead, spend, **contact)
+        try:
+            find_contact(lead, spend, **contact)
+        except StopRun:
+            raise
+        except Exception as e:  # an odd provider answer must not lose the person: keep what was found
+            treg.note(lead["person_linkedin_url"], e)
+            return lead, f"email lookup failed ({type(e).__name__})", how, spend.micro
     return lead, "", how, spend.micro
 
 
@@ -474,8 +484,14 @@ def process_company(row, treg, domains, hunter, enrich=True, paid_emails=False, 
                                            spend, domains)
         lead["website"] = lead["website"] or (f"https://{lead['domain']}" if lead["domain"] else "")
     if enrich:
-        site = crawl_site(lead["website"], treg=spend) if lead["website"] else \
-            {"emails": [], "phones": [], "error": "no website"}
+        try:
+            site = crawl_site(lead["website"], treg=spend) if lead["website"] else \
+                {"emails": [], "phones": [], "error": "no website"}
+        except StopRun:
+            raise
+        except Exception as e:  # an odd website must not lose the company: keep its LinkedIn data
+            treg.note(lead["source_url"], e)
+            site = {"emails": [], "phones": [], "error": f"website scrape failed ({type(e).__name__})"}
         lead.update(enrich_paid(site, lead["domain"], spend, paid_emails, verify, hunter))
         lead["all_phones"] = [p for p in dict.fromkeys([lead["phone"], *site.get("phones", [])]) if p]
         lead["phone"] = lead["phone"] or next(iter(lead["all_phones"]), "")
@@ -573,7 +589,10 @@ def main(argv=None):
     if a.input and not Path(a.input).is_file():
         ap.error(f"--input {a.input} not found")
     if a.dry_run:
-        print(dry_run(a, titles, Treg(a.max_cost)))
+        try:
+            print(dry_run(a, titles, Treg(a.max_cost)))
+        except (StopRun, TregError) as e:  # the free count call failed: one line, nothing spent
+            sys.exit(f"dry run failed: {e}")
         return
     out_path = a.out or ("leads_linkedin_companies.csv" if company else "leads_linkedin.csv")
     if Path(out_path).exists() and Path(out_path).stat().st_size and not a.resume:
@@ -619,8 +638,12 @@ def main(argv=None):
             while not stop and len(pending) < WORKERS and need() > 0:
                 try:
                     item = next(rows, None)
-                except (BudgetReached, OutOfBalance, TregError) as e:  # a search page could not be bought
+                except (StopRun, TregError) as e:  # a search page could not be bought
                     stop = str(e)
+                    return
+                except Exception as e:  # an odd search answer: stop with one line, details in the run log
+                    treg.note("search page", e)
+                    stop = f"search failed ({type(e).__name__}; see the run log)"
                     return
                 if item is None:
                     return
@@ -642,10 +665,11 @@ def main(argv=None):
             nonlocal stop
             try:
                 result = f.result()
-            except (BudgetReached, OutOfBalance) as e:
+            except StopRun as e:
                 stop = stop or str(e)  # this row is dropped unwritten, so --resume redoes it
                 return cancel()
-            except Exception as e:  # a bug or an odd answer loses one row, never the run
+            except Exception as e:  # a bug before the row had any data: lose this one row, never the run
+                treg.note(item[0].get("profileUrl") or item[0].get("url"), e)
                 problems[f"failed ({type(e).__name__})"] += 1
                 return
             if company:
@@ -656,6 +680,8 @@ def main(argv=None):
                 return
             lead, reason, how, spent = result
             stats["found"] += 1
+            if lead is not None and reason:  # kept with what was found before a step failed
+                problems[re.sub(r" \(.*", "", reason)] += 1
             if lead is None:
                 reasons[reason.split(":")[0]] += 1
                 p = item[0]
@@ -708,6 +734,8 @@ def main(argv=None):
         print("  problems: " + ", ".join(f"{k} x{v}" for k, v in problems.most_common()))
     print(f"  spent ${treg.spent_usd:.4f}" + (f" (${treg.spent_usd / n:.5f} per row)" if n else "")
           + f" | run log {treg.log_path}" + ("" if company else f" | dropped people {rejects_path}"))
+    if treg.failures():
+        print(treg.failures())
     if stop:
         print(f"  stopped early: {stop}")
 
