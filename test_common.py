@@ -388,6 +388,14 @@ def test_enrich_paid_failure_not_cached():
     assert cache == {}  # a later lead with this domain may try again
 
 
+def test_junk_emails_are_never_leads():  # M15
+    for junk in ("logo@2x.png", "a1b2c3d4e5f6a7b8c9d0e1f2@sentry.wixpress.com", "noreply@acme.com", "no-reply@acme.com",
+                 "your@email.com", "name@yourdomain.com", "info@example.com", "user@domain.com"):
+        assert common.JUNK_EMAIL.search(junk), junk
+    for real in ("info@acme.com", "dr.lee@smilesaustin.com", "jo@reply-studio.com"):
+        assert not common.JUNK_EMAIL.search(real), real
+
+
 def test_suppression_list():  # M14
     from pathlib import Path
     from common import COMPANY_COLUMNS, LeadWriter, Suppression, suppression

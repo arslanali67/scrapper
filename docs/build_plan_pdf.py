@@ -483,7 +483,7 @@ MODULES = [
          done="A domain in suppress.txt never appears in any output CSV."),
 
     dict(id="M15", title="Testing & README", tag="CROSS-CUTTING · P1", pri="P1",
-         state="No tests exist",
+         state="Built (Nov 4): 57 checks, X-A1 in Excel; awaiting sign-off",
          goal="One small test file for the logic that can silently go wrong, real acceptance runs for each scraper, "
               "and a README so the tool can be used without this document.",
          used_by="Both scrapers",
@@ -504,7 +504,10 @@ MODULES = [
               "L-A2: --mode company --input with 20 URLs returns exactly those 20. L-A3: --dry-run leaves the treg "
               "balance unchanged. L-A4: --resume never repeats an email lookup.",
               "X-A1: every CSV opens in Excel with correct characters, and the first 12 columns match in name and order.",
-              f"{c('README.md')}: setup (M0), commands with examples, all flags, columns, cost notes, compliance notes."],
+              f"{c('README.md')}: setup (M0), commands with examples, all flags, columns, cost notes, compliance notes.",
+              f"Built: 57 offline checks in {c('test_common.py')}, {c('test_google.py')} and {c('test_linkedin.py')} "
+              "(plain asserts, no pytest needed). G-A1..G-A4 ran in M7-M8, L-A1..L-A4 in M12. X-A1, checked in Excel: all "
+              "three CSVs open with the shared first 12 columns, accented text intact and phones as text."],
          files="test_common.py (new) · README.md (new)",
          deps="pytest (dev, optional)",
          done="All checks pass and the owner signs off on one real CSV from each scraper."),

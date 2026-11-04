@@ -10,6 +10,7 @@ import linkedin_scraper as ls
 from common import TregError, cell, domain_of
 
 HR = ls.title_variants("HR")
+ROLE_TITLES_UNDER_TEST = list(ls.ROLE_TITLES)
 
 
 def person(i, **kw):
@@ -213,6 +214,10 @@ def test_xray_queries_and_parsing():
     qs = list(ls.xray_queries(HR, "Texas", "tech"))
     assert qs[0] == 'site:linkedin.com/in ("HR Manager" OR "HR Director" OR "Human Resources") "Texas" "software"'
     assert len([q for q in qs if '"Texas"' in q]) == 3 and '"Houston"' in qs[3]
+    # Google drops words past the 32nd, which would silently lose the place or the industry word (M15)
+    for role in ROLE_TITLES_UNDER_TEST:
+        for q in ls.xray_queries(ls.title_variants(role), "Texas", "healthcare"):
+            assert len(q.split()) <= 32, q
     assert ls.parse_xray_title("Ann Lee – HR Director – Acme | LinkedIn") == ["Ann Lee", "HR Director", "Acme"]
     assert ls.parse_xray_title("Bo Chan - LinkedIn") == ["Bo Chan", "", ""]
     rows = ls.xray_search(PagedTreg(), "q", set())
