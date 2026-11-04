@@ -101,13 +101,13 @@
   "email_find_person_fallback": {
     "id": "treg.people.email.find",
     "method": "POST",
-    "price_usd": 0.0062,
-    "price_type": "per attempt incl. billed misses (observed $0.0048-$0.0062)",
+    "price_usd": 0.005,
+    "price_type": "per hit ($0.0048 quickenrich - $0.01 moltsets); misses free once orbisearch is excluded",
     "max_cost_usd": 0.011,
-    "headers": {"X-Treg-Route-Exclude": "blitzapi,enrow"},
+    "headers": {"X-Treg-Route-Exclude": "blitzapi,enrow,orbisearch,tomba"},
     "timeout_s": 180,
     "params": {"linkedin_url": "...", "first_name": "...", "last_name": "...", "domain": "acme.com"},
-    "note": "Tier 2, only for tier-1 misses. 1/4 hits in test; one attempt took 77 s. Never send X-Treg-Route-Verify here: it waterfalled 5 providers, ran >120 s and cost ~$0.018."
+    "note": "Tier 2, only for tier-1 misses; tries quickenrich, trykitt, aiark, moltsets. Excluded: blitzapi (tier 1 already asked), enrow (async, slow), orbisearch (the only per-call provider under the cap: bills $0.0062 on every attempt for a treg-observed 1.6% hit rate; it was the whole cost of M1's billed misses), tomba (M11 run: 0 hits in 7 tries, up to 125 s each, 72% of the run's time; it pushed one call past the 180 s timeout, and the hit that came after was billed but never received). Never send X-Treg-Route-Verify here: it waterfalled 5 providers, ran >120 s and cost ~$0.018."
   },
   "email_verify": {
     "id": "treg.people.email.verify",

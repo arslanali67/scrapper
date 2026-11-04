@@ -2,10 +2,12 @@
 
   python linkedin_scraper.py --role HR --industry tech --location Texas --limit 100
   python linkedin_scraper.py --titles "Office Manager,Practice Manager" --location "Austin, TX" --source xray
+  python linkedin_scraper.py --role HR --location Texas --limit 50 --verify --phone
 
 People come from a people-database search through treg (icypeas), never from logging in to LinkedIn.
 --source xray uses Google X-ray search instead (site:linkedin.com/in ...). M9 discovery; M10 checks every person
-(current title, state) and fills the company domain; M11 finds work emails; M12 adds the full command.
+(current title, state) and fills the company domain; M11 finds each kept person's work email (and phone);
+M12 adds the full command.
 """
 import argparse
 import json
@@ -17,7 +19,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from common import (ENDPOINTS, PEOPLE_COLUMNS, BudgetReached, LeadSpend, LeadWriter, OutOfBalance, Treg, TregError,
-                    cities_of, domain_of, state_code, states)
+                    cities_of, domain_of, email_status, normalize_phone, state_code, states)
 
 # Job-title variants per role; --titles overrides. Unknown roles are searched as written.
 ROLE_TITLES = {
@@ -297,8 +299,64 @@ def map_person(p, search_query):
     }
 
 
-def process(p, treg, titles, st, cache, search_query):
-    """One discovered person -> (lead or None, reject reason, how the domain was found, micro-USD spent on them)."""
+# ---------------------------------------------------------------- work email and phone (M11)
+def _found(capability, r):
+    """Finder reply -> (email, other emails, provider, confidence); email is '' on a miss."""
+    if capability == "email_find_person":  # blitzapi direct: found, email, all_emails [{email}]
+        if not r.get("found"):
+            return "", [], "", ""
+        return r.get("email") or "", [e.get("email") for e in r.get("all_emails") or []], "blitzapi", ""
+    o = r.get("output") or {}  # routed: output.email, confidence 0-1; the provider rides in _treg.served_by
+    return o.get("email") or "", [], ((r.get("_treg") or {}).get("served_by") or "").split(".")[0], o.get("confidence")
+
+
+def find_contact(lead, treg, fallback=True, verify=False, phone=False):
+    """M11: the person's work email (and phone) from email-finder providers, never a guessed address.
+    Tier 1: blitzapi by LinkedIn URL ($0.000495 per hit, misses free). Tier 2, tier-1 misses only: treg's routed
+    finder by URL, name and domain, capped, per-hit providers only (see endpoints.json). With verify, a bounced
+    address counts as a miss. TregError skips a step; BudgetReached / OutOfBalance propagate and stop the run."""
+    url = lead["person_linkedin_url"]
+    tiers = [("email_find_person", {"person_linkedin_url": url})]
+    if fallback:
+        ident = {"linkedin_url": url, "first_name": lead.get("first_name"), "last_name": lead.get("last_name"),
+                 "domain": lead.get("domain")}
+        tiers.append(("email_find_person_fallback", {k: v for k, v in ident.items() if v}))
+    bounced = []
+    for capability, params in tiers:
+        try:
+            email, others, source, confidence = _found(capability, treg.call(capability, params))
+        except TregError:
+            continue  # provider down or timed out: try the next tier
+        if not email:
+            continue
+        email, status = email.lower(), ""
+        if verify:
+            try:
+                status = email_status(treg.call("email_verify", {"email": email}).get("output"))
+            except TregError:
+                pass
+            if status == "invalid":
+                bounced.append(email)
+                continue
+        lead.update(email=email, all_emails=[email, *(e.lower() for e in others if e)], email_source=source,
+                    email_status=status, email_confidence=confidence)
+        break
+    if bounced and not lead.get("email"):
+        lead.update(all_emails=bounced, email_status="invalid")  # kept for reference, never as the email
+    if phone:
+        try:
+            number = normalize_phone((treg.call("phone_find_person", {"linkedin_url": url}).get("output") or {})
+                                     .get("phone"))
+        except TregError:
+            number = ""
+        if number:
+            lead.update(phone=number, all_phones=[number])
+    return lead
+
+
+def process(p, treg, titles, st, cache, search_query, **contact):
+    """One discovered person -> (lead or None, reject reason, how the domain was found, micro-USD spent on them).
+    contact: find_contact options (fallback, verify, phone)."""
     spend = LeadSpend(treg)
     if p.get("source") == "xray":
         try:
@@ -310,8 +368,10 @@ def process(p, treg, titles, st, cache, search_query):
         return None, reason, "", spend.micro
     domain, how = company_domain(p, spend, cache)
     lead = map_person(p, search_query)
-    if domain and not lead["domain"]:
-        lead["domain"], lead["website"] = domain, f"https://{domain}"
+    lead["domain"] = domain  # never the host of a LinkedIn or social link in the website field
+    if domain and how != "website":
+        lead["website"] = f"https://{domain}"
+    find_contact(lead, spend, **contact)
     return lead, "", how, spend.micro
 
 
@@ -326,6 +386,9 @@ def main(argv=None):
     ap.add_argument("--limit", type=int, default=100, help="people to keep (after the checks)")
     ap.add_argument("--out", default="leads_linkedin.csv")
     ap.add_argument("--max-cost", type=float, default=1.0, help="hard spend limit in USD for this run")
+    ap.add_argument("--no-fallback", action="store_true", help="tier-1 email finder only (skip the routed finder)")
+    ap.add_argument("--verify", action="store_true", help="verify each found email (up to $0.00124 each)")
+    ap.add_argument("--phone", action="store_true", help="also look up each person's phone (misses free)")
     a = ap.parse_args(argv)
     titles = title_variants(a.role, a.titles)
     if not titles:
@@ -335,7 +398,8 @@ def main(argv=None):
 
     treg, seen, cache = Treg(a.max_cost), set(), {}
     _, st = location_filter(a.location)
-    reasons, domains, stats, stop = Counter(), Counter(), Counter(), ""
+    reasons, domains, emails, stats, stop = Counter(), Counter(), Counter(), Counter(), ""
+    contact = dict(fallback=not a.no_fallback, verify=a.verify, phone=a.phone)
     rejects_path = treg.log_path.with_name(treg.log_path.stem + "-rejected.jsonl")
     label = f"{a.role or a.titles} | {a.industry or 'any industry'} | {a.location or 'anywhere'}"
 
@@ -346,15 +410,18 @@ def main(argv=None):
                 if stats["kept"] >= a.limit:
                     return
                 stats["found"] += 1
-                lead, reason, how, spent = process(p, treg, titles, st, cache, search_query)
+                lead, reason, how, spent = process(p, treg, titles, st, cache, search_query, **contact)
                 if lead is None:
                     reasons[reason.split(":")[0]] += 1
                     rejects.write(json.dumps({"profile": p.get("profileUrl"), "title": p.get("lastJobTitle"),
                                               "location": p.get("address"), "reason": reason}) + "\n")
                     continue
-                domains[how or "none"] += 1
                 lead["cost_usd"] = round((share + spent) / 1e6, 6)
-                stats["kept"] += out.write(lead)
+                if out.write(lead):
+                    stats["kept"] += 1
+                    stats["phone"] += bool(lead.get("phone"))
+                    domains[how or "none"] += 1
+                    emails[lead.get("email_source") or "none"] += 1
             if stats["found"] >= 50 and stats["kept"] < stats["found"] * 0.1:
                 # Guard against paging (and paying) through thousands of rows that all fail the checks.
                 raise TregError(f"only {stats['kept']} of {stats['found']} people pass the checks; "
@@ -385,7 +452,9 @@ def main(argv=None):
     print(f"{stats['kept']} people -> {a.out} | {stats['found']} checked, "
           f"{stats['found'] - stats['kept']} dropped" + (f" ({', '.join(f'{k} x{v}' for k, v in reasons.most_common())})"
                                                        if reasons else ""))
-    print(f"  company domain: " + ", ".join(f"{k} {v}" for k, v in domains.most_common()) if domains else "  company domain: -")
+    counts = lambda c: ", ".join(f"{k} {v}" for k, v in c.most_common()) or "-"
+    print(f"  company domain: {counts(domains)}")
+    print(f"  work email: {counts(emails)}" + (f" | phone: {stats['phone']} of {stats['kept']}" if a.phone else ""))
     print(f"  spent ${treg.spent_usd:.4f} | run log {treg.log_path} | dropped people {rejects_path}"
           + (f" | stopped early: {stop}" if stop else ""))
 

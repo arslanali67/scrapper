@@ -375,7 +375,7 @@ MODULES = [
               "with a reason."),
 
     dict(id="M11", title="Work Email & Phone Finder", tag="PHASE 3 · P0", pri="P0",
-         state="Does not exist (tiers measured in M1)",
+         state="Done (Nov 4): work email 17/20; fallback misses free",
          goal="Find each qualified person's work email, and optionally phone. LinkedIn does not show emails publicly, "
               "so they come from email-finder providers through treg: a cheap tier first, a capped fallback for misses.",
          used_by="LinkedIn scraper (people mode)",
@@ -386,10 +386,14 @@ MODULES = [
          how=[f"Tier 1: {c('blitzapi.people.email.find')} with {c('person_linkedin_url')}: $0.000495 per hit, misses "
               "free; M1 hit rate 15/30 (50%).",
               f"Tier 2 for misses: {c('treg.people.email.find')} with linkedin_url, first/last name and domain; headers "
-              f"{c('X-Treg-Route-Max-Cost: 0.011')} and {c('X-Treg-Route-Exclude: blitzapi,enrow')}; 180 s timeout. "
-              f"About $0.006 per attempt and 1 in 4 hits in M1. {c('--no-fallback')} skips it.",
+              f"{c('X-Treg-Route-Max-Cost: 0.011')} and {c('X-Treg-Route-Exclude: blitzapi,enrow,orbisearch,tomba')}; "
+              "180 s timeout. Only per-hit providers are left (quickenrich, trykitt, aiark, moltsets), so a miss is free "
+              "and a hit costs $0.0048-$0.01. orbisearch billed $0.0062 on every attempt for a 1.6% hit rate; tomba found "
+              f"nothing in 7 tries and took 72% of the run's time. M11: 8 of 11 tier-1 misses found. {c('--no-fallback')} "
+              "skips it.",
               f"Never send {c('X-Treg-Route-Verify')} on the finder: in M1 it tried 5 providers, ran past 120 s and cost "
-              f"$0.018. With {c('--verify')}, call {c('treg.people.email.verify')} separately (up to $0.00124).",
+              f"$0.018. With {c('--verify')}, call {c('treg.people.email.verify')} separately (up to $0.00124); a "
+              "bounced address counts as a miss, so the next tier is tried.",
               f"Write {c('email')}, {c('email_status')}, {c('email_confidence')}, and {c('email_source')} = the provider "
               "that served it. No result: leave it empty; never write unverified guesses such as first.last@domain.",
               f"With {c('--phone')} call {c('treg.people.phone.find')} (cap $0.005; no provider bills misses).",

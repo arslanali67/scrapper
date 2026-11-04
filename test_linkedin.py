@@ -1,10 +1,11 @@
 """Offline checks for linkedin_scraper.py (no network, no spend). Run: python test_linkedin.py"""
 import csv
 import tempfile
+from collections import Counter
 from pathlib import Path
 
 import linkedin_scraper as ls
-from common import TregError
+from common import TregError, cell
 
 HR = ls.title_variants("HR")
 
@@ -104,8 +105,56 @@ def test_enrich_profile_mapping():
     assert p["lastCompanyUrl"] == "https://www.linkedin.com/company/acme" and p["headline"] == "People leader"
 
 
+def test_find_contact_tiers_verify_phone():
+    lead = lambda: {"person_linkedin_url": "https://www.linkedin.com/in/ann-lee", "first_name": "Ann", "last_name": "Lee",
+                    "domain": "acme.com"}
+    hit1 = lambda p: {"found": True, "email": "Ann@Acme.com", "all_emails": [{"email": "ann@acme.com"}, {"email": "a.lee@acme.com"}]}
+    miss1 = lambda p: {"found": False, "email": None, "all_emails": []}
+    hit2 = lambda p: {"output": {"email": "ann.lee@acme.com", "confidence": 0.9},
+                      "_treg": {"served_by": "quickenrich.people.email.find"}}
+    t = Fake(email_find_person=hit1)  # tier-1 hit: tier 2 never asked
+    l = ls.find_contact(lead(), t)
+    assert (l["email"], l["email_source"], cell(l["all_emails"])) == ("ann@acme.com", "blitzapi", "ann@acme.com | a.lee@acme.com")
+    assert t.calls == [("email_find_person", {"person_linkedin_url": "https://www.linkedin.com/in/ann-lee"})]
+    t = Fake(email_find_person=miss1, email_find_person_fallback=hit2)  # miss -> tier 2 with every identity field
+    l = ls.find_contact(lead(), t)
+    assert (l["email"], l["email_source"], l["email_confidence"]) == ("ann.lee@acme.com", "quickenrich", 0.9)
+    assert t.calls[1] == ("email_find_person_fallback", {"linkedin_url": "https://www.linkedin.com/in/ann-lee",
+                                                         "first_name": "Ann", "last_name": "Lee", "domain": "acme.com"})
+    t = Fake(email_find_person=miss1)  # --no-fallback: a miss stays empty, never a guessed address
+    assert not ls.find_contact(lead(), t, fallback=False).get("email") and len(t.calls) == 1
+
+    def down(p):
+        raise TregError("provider out", 503)
+    t = Fake(email_find_person=down, email_find_person_fallback=lambda p: {"output": {"email": None}})
+    assert not ls.find_contact({**lead(), "domain": ""}, t).get("email")  # outage on tier 1 still tries tier 2
+    assert "domain" not in t.calls[1][1]  # empty fields are not sent
+    verdicts = iter([{"valid": False, "status": "invalid"}, {"valid": True, "status": "safe"}])
+    t = Fake(email_find_person=hit1, email_find_person_fallback=hit2, email_verify=lambda p: {"output": next(verdicts)})
+    l = ls.find_contact(lead(), t, verify=True)  # a bounce counts as a miss
+    assert (l["email"], l["email_status"], l["email_source"]) == ("ann.lee@acme.com", "valid", "quickenrich")
+    t = Fake(email_find_person=hit1, email_verify=lambda p: {"output": {"valid": False, "status": "invalid"}})
+    l = ls.find_contact(lead(), t, fallback=False, verify=True)
+    assert not l.get("email") and (l["all_emails"], l["email_status"]) == (["ann@acme.com"], "invalid")
+    t = Fake(email_find_person=miss1, phone_find_person=lambda p: {"output": {"phone": "+15124741234"}})
+    assert ls.find_contact(lead(), t, fallback=False, phone=True)["phone"] == "+1 512-474-1234"
+    t = Fake(email_find_person=miss1, phone_find_person=lambda p: {"output": {"phone": None}})
+    assert "phone" not in ls.find_contact(lead(), t, fallback=False, phone=True)
+
+
+def test_process_never_uses_a_linkedin_link_as_domain():
+    p = person(1, lastCompanyWebsite="https://www.linkedin.com/company/beta", lastCompanyUrl="https://www.linkedin.com/company/beta")
+    t = Fake(company_domain_from_linkedin=lambda q: {"found": True, "email_domain": "beta.io"}, email_find_person=lambda q: {})
+    lead, reason, how, _ = ls.process(p, t, HR, "TX", {}, "q", fallback=False)
+    assert (lead["domain"], lead["website"], how, reason) == ("beta.io", "https://beta.io", "linkedin page", "")
+    t = Fake(company_domain_from_linkedin=lambda q: {"found": False}, company_by_name=lambda q: {}, email_find_person=lambda q: {})
+    lead, *_ = ls.process(p, t, HR, "TX", {}, "q", fallback=False)
+    assert lead["domain"] == ""  # not "linkedin.com"
+
+
 class PagedTreg(Fake):
-    """icypeas fake: pages of `size` people; the second page repeats one person; 3 pages then no token."""
+    """icypeas fake: pages of `size` people; the second page repeats one person; 3 pages then no token.
+    Email tier 1 hits profile URLs ending in an even digit; tier 2 hits the rest."""
 
     def __init__(self, make=person, pages=3):
         super().__init__()
@@ -123,6 +172,10 @@ class PagedTreg(Fake):
                                "location": "Houston, Texas, United States"}, "raw": {}}
         if capability == "company_by_name":
             return {"output": {"companies": [{"name": "Acme", "domain": "acme.com"}]}}
+        if capability == "email_find_person":
+            return {"found": params["person_linkedin_url"][-1] in "02468", "email": "a@co.com"}
+        if capability == "email_find_person_fallback":
+            return {"output": {"email": "b@co.com"}, "_treg": {"served_by": "quickenrich.people.email.find"}}
         n = len([c for c in self.calls if c[0] == "people_search"])
         size, start = params["pagination"]["size"], (n - 1) * 1000
         people = [self.make(start + i) for i in range(size)] + ([self.make(0)] if n == 2 else [])
@@ -171,6 +224,12 @@ def test_main_people_keeps_paging_past_rejects():
     assert r["domain"] == "co0.com" and r["full_name"] == "First0 Last0" and r["city"] == "Austin"
     rejected = [l for l in t.log_path.with_name("run-rejected.jsonl").read_text().splitlines()]
     assert rejected and all("outside TX" in l for l in rejected)
+    # nobody is looked up twice; only kept people are; tier 2 only for tier-1 misses
+    looked = Counter(p["person_linkedin_url"] for c, p in t.calls if c == "email_find_person")
+    assert len(looked) == 120 and set(looked.values()) == {1}
+    assert sorted(p["linkedin_url"] for c, p in t.calls if c == "email_find_person_fallback") == \
+        sorted(r["person_linkedin_url"] for r in rows if r["email_source"] == "quickenrich")
+    assert {r["email_source"] for r in rows} == {"blitzapi", "quickenrich"} and all(r["email"] for r in rows)
 
 
 def test_main_xray_looks_profiles_up_and_fills_domain():

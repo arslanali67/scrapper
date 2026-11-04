@@ -34,6 +34,8 @@ Chosen IDs, caps and example params are in [`endpoints.json`](../endpoints.json)
 
 - **Google lead:** about $0.0002 (search share $0.0000015 + occasional JS extract). With `--paid-emails`, add ~$0.0245 for each business whose website shows no email.
 - **LinkedIn person with work email:** about $0.0009 with tier 1 only; about $0.0035 with the tier-2 fallback. 1,000 people ≈ $1-4.
+  Measured in M11 (fallback misses now free): **$0.0028 per person, $0.0033 per email found**; `--verify` adds ~$0.0009
+  per email, `--phone` ~$0.0005 per person.
 
 ## Plan changes from these findings
 
@@ -64,7 +66,22 @@ Chosen IDs, caps and example params are in [`endpoints.json`](../endpoints.json)
   dropped (19 current title no longer HR, 7 outside Texas, 2 no location), domain 18/20 (15 via the company's
   LinkedIn page, 2 name search, 1 website), $0.041 (~$0.002 per kept person, 5x the people search).
 
+- **M11 work email and phone** (2026-11-04, 20 HR people in Texas tech, `--verify --phone`): tier 1 (blitzapi) found
+  **9/20** for $0.0045; tier 2 ran only for the 11 misses and found **8/11** (quickenrich 5, trykitt, aiark, moltsets),
+  with its 3 misses free. Total **17/20 work emails (85%)**, every person looked up once. All on company domains, no
+  free-mail: 10 on the website's domain, 5 on the same brand's other domain (e.g. a short-link website), 1 unrelated
+  domain that verified "risky". Verify: 12 valid, 4 risky, 0 invalid (contactout free 4 times, else orbisearch
+  $0.00124). Phone: **13/20** for $0.0093 (blitzapi 9, leadocean 3 free, quickenrich 1). Run: $0.0707 logged, 9 min.
+  Two exclusions came out of this run (endpoints.json `email_find_person_fallback`):
+  - **orbisearch**: the only per-call provider under the cap. It bills $0.0062 on every attempt for a treg-observed hit
+    rate of 1.6%, and it was the whole cost of M1's billed misses. Excluding it makes tier-2 misses free.
+  - **tomba**: 0 hits in 7 tries, up to 125 s each, 72% of the run's time. It pushed one call past the 180 s client
+    timeout; the router went on, moltsets hit, and the $0.01 was billed but never received (`GET /calls` shows it).
+    Without tomba, the 4 email-less people re-ran in 7-16 s each: 3 misses ($0) and that moltsets hit.
+  `GET /calls` (call history with `cost_charged_micro` per provider attempt) and `GET /orgs/56333/balance` work with
+  the agent token.
+
 ## Not measured yet
 
 - Per-query depth limit of the X-ray search beyond one query (76 rows at limit 100).
-- Phone-find hit rate (1 sample).
+- Recovering the result of a call that outlived the client timeout (it may still bill): M13.
