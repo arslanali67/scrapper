@@ -116,6 +116,9 @@ def test_cell_and_normalizers():
     assert normalize_phone("(512) 474-1234") == "+1 512-474-1234" == normalize_phone("+15124741234")
     assert normalize_phone("12345") == "" and normalize_phone("020 7123 4567", "GB") == "+44 20 7123 4567"
     assert cell("+1 512-474-1234") == "+1 512-474-1234"  # not mistaken for a formula
+    assert cell(["+1 512-474-1234", "+1 512-717-3147"]) == "+1 512-474-1234 | +1 512-717-3147"
+    assert cell("+cmd|' /C calc'!A0").startswith("'")  # classic CSV-injection payload is still defused
+    assert cell("Family dentist.\r\n  Open Saturdays.\n") == "Family dentist. Open Saturdays."
 
 
 def test_lead_writer_resume():

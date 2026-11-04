@@ -62,14 +62,15 @@ class Treg:
     def spent_usd(self):
         return self.spent_micro / 1e6
 
-    def call(self, capability, params=None):
-        """Call the endpoint chosen for `capability` in endpoints.json. Returns the parsed JSON. Thread-safe."""
+    def call(self, capability, params=None, tally=None):
+        """Call the endpoint chosen for `capability` in endpoints.json. Returns the parsed JSON. Thread-safe.
+        tally: optional list; the call's charged micro-USD is appended to it (also when the call then fails)."""
         # ponytail: one lock around the whole call keeps the budget check exact across threads but runs treg calls
         # one at a time; switch to reserve-then-settle accounting if parallel treg calls are ever needed for speed.
         with self._lock:
-            return self._call(capability, params)
+            return self._call(capability, params, tally)
 
-    def _call(self, capability, params):
+    def _call(self, capability, params, tally=None):
         ep = ENDPOINTS[capability]
         cap_micro = round(ep["max_cost_usd"] * 1e6)
         # Worst case is the per-call cap, so checking it here means --max-cost can never be overshot.
@@ -98,6 +99,8 @@ class Treg:
             break
         cost = int(r.headers.get("X-Treg-Cost-Micro") or 0)
         self.spent_micro += cost
+        if tally is not None:
+            tally.append(cost)
         try:
             body = r.json()
         except ValueError:
@@ -120,6 +123,20 @@ class Treg:
                "status": status, "cost_micro": cost, "served_by": served_by, "secs": round(time.time() - t0, 1)}
         with open(self.log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(rec) + "\n")
+
+
+class LeadSpend:
+    """Wraps a Treg to meter one lead's spend: pass it wherever a Treg is expected, then read .micro."""
+
+    def __init__(self, treg):
+        self.treg, self.micro = treg, 0
+
+    def call(self, capability, params=None):
+        charged = []
+        try:
+            return self.treg.call(capability, params, tally=charged)
+        finally:
+            self.micro += sum(charged)
 
 
 def estimate(calls):
@@ -145,16 +162,17 @@ COMPANY_COLUMNS = SHARED_COLUMNS + [
     "all_locations", "founded_year", "company_type", "specialties", "followers", "logo_url", "funding_info",
     "socials", "email_status", "scraped_at", "cost_usd"]
 
-_NUMERIC = re.compile(r"^[+-]?[\d .()/-]+$")
+_NUMERIC = re.compile(r"^[+-]?[\d .()/+|-]+$")  # numbers, phones and ' | '-joined phone lists: never a formula
 
 
 def cell(value):
-    """One CSV cell: lists joined with ' | ' (deduped, order kept), None -> '', formula-looking text defused."""
+    """One CSV cell: lists joined with ' | ' (deduped, order kept), None -> '', line breaks -> spaces (one lead = one
+    line, which CRMs and line-based tools need), formula-looking text defused."""
     if value is None:
         return ""
     if isinstance(value, (list, tuple, set)):
         value = " | ".join(dict.fromkeys(str(v).strip() for v in value if v not in (None, "")))
-    value = str(value).strip()
+    value = re.sub(r"\s*[\r\n]+\s*", " ", str(value)).strip()
     # Scraped text that starts with = + - @ would run as a formula in Excel; phone numbers and plain numbers are fine.
     if value[:1] in ("=", "+", "-", "@") and not _NUMERIC.match(value):
         value = "'" + value

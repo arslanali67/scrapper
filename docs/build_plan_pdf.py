@@ -264,7 +264,7 @@ MODULES = [
          done="&quot;dentists&quot; in &quot;Austin, TX&quot; with --limit 50 --no-enrich gives 50 unique rows with phone for 90%+."),
 
     dict(id="M7", title="Google Scraper CLI & Run Summary", tag="PHASE 2 · P0", pri="P0",
-         state="Does not exist",
+         state="Done (Nov 4): G-A1..G-A3 pass (email 56%, budget stop, resume)",
          goal="One command: area plan -&gt; Maps search -&gt; details -&gt; website deep scrape -&gt; CSV, with dry-run, "
               "budget and resume.",
          used_by="Google scraper",
