@@ -58,6 +58,12 @@ Chosen IDs, caps and example params are in [`endpoints.json`](../endpoints.json)
   X-ray fallback: one query -> 30 unique profiles for $0.0015 with name 30/30, title 29/30, but company only 3/30
   and no website, so X-ray rows need M10's lookup.
 
+- **M10 checks and domains** (2026-11-04): on M1's loose-filter sample the state check dropped exactly the 6 people
+  outside Texas (WA, NJ, FL, Pakistan, UK, bare "United States") and kept Dallas-Fort Worth. People search, 20 HR in
+  Texas: 0 dropped, domain 20/20 from the company website, $0.0076. X-ray, 20 kept: 48 profiles looked up, 28
+  dropped (19 current title no longer HR, 7 outside Texas, 2 no location), domain 18/20 (15 via the company's
+  LinkedIn page, 2 name search, 1 website), $0.041 (~$0.002 per kept person, 5x the people search).
+
 ## Not measured yet
 
 - Per-query depth limit of the X-ray search beyond one query (76 rows at limit 100).

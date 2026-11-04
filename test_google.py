@@ -42,7 +42,7 @@ class FakeTreg:
     def spent_usd(self):
         return self.spent_micro / 1e6
 
-    def call(self, capability, params, tally=None):
+    def call(self, capability, params, tally=None, max_cost=None):
         self.calls.append((capability, params))
         cost = 150 if capability == "maps_search" else 1000
         self.spent_micro += cost
@@ -164,7 +164,7 @@ class AreaTreg(FakeTreg):
         super().__init__([])
         self.answer = answer
 
-    def call(self, capability, params, tally=None):
+    def call(self, capability, params, tally=None, max_cost=None):
         super().call(capability, params, tally)
         return {"rows": self.answer(params["location"])}
 

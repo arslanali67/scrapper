@@ -71,6 +71,24 @@
     "params": {"industry": "software", "country": "US", "limit": 50},
     "note": "Company mode discovery. Rows: name, website_url, phone_number, linkedin_url, city, state, industry, company_size, founded."
   },
+  "company_domain_from_linkedin": {
+    "id": "blitzapi.companies.linkedin-to-domain",
+    "method": "POST",
+    "price_usd": 0.000495,
+    "price_type": "per hit, misses free",
+    "max_cost_usd": 0.002,
+    "params": {"company_linkedin_url": "https://www.linkedin.com/company/<slug>"},
+    "note": "M10: email domain when a person row has the company's LinkedIn page but no website. Response: found, email_domain."
+  },
+  "company_by_name": {
+    "id": "treg.companies.search",
+    "method": "POST",
+    "price_usd": 0.0,
+    "price_type": "per hit; leadocean ($0, 93% hit) first, then blitzapi ($0.000495)",
+    "max_cost_usd": 0.003,
+    "params": {"name": "Acme Inc", "country": "US", "limit": 3},
+    "note": "M10 last resort for a missing domain. Rows are provider-native; only a row whose name matches is used."
+  },
   "email_find_person": {
     "id": "blitzapi.people.email.find",
     "method": "POST",

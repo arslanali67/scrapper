@@ -65,13 +65,14 @@ class Treg:
     def spent_usd(self):
         return self.spent_micro / 1e6
 
-    def call(self, capability, params=None, tally=None):
+    def call(self, capability, params=None, tally=None, max_cost=None):
         """Call the endpoint chosen for `capability` in endpoints.json. Returns the parsed JSON. Thread-safe, and calls
         run in parallel: each reserves its worst-case cost (the per-call cap) first and settles to the real cost after,
         so --max-cost can never be overshot however many threads call at once.
-        tally: optional list; the call's charged micro-USD is appended to it (also when the call then fails)."""
+        tally: optional list; the call's charged micro-USD is appended to it (also when the call then fails).
+        max_cost: a tighter per-call cap in USD for this call (e.g. a small page of a per-row priced search)."""
         ep = ENDPOINTS[capability]
-        cap_micro = round(ep["max_cost_usd"] * 1e6)
+        cap_micro = round(min(ep["max_cost_usd"], max_cost if max_cost is not None else ep["max_cost_usd"]) * 1e6)
         with self._lock:
             if self.spent_micro + self._reserved + self._unsettled + cap_micro > self.budget_micro:
                 raise BudgetReached(f"budget ${self.budget_micro / 1e6:.2f} reached (spent ${self.spent_usd:.4f})")
@@ -83,7 +84,7 @@ class Treg:
                 self._reserved -= cap_micro
 
     def _call(self, capability, ep, cap_micro, params, tally):
-        headers = {"X-Treg-Route-Max-Cost": str(ep["max_cost_usd"]), **ep.get("headers", {})}
+        headers = {"X-Treg-Route-Max-Cost": f"{cap_micro / 1e6:.6f}".rstrip("0").rstrip("."), **ep.get("headers", {})}
         get = ep["method"] == "GET"
         req = dict(params=params if get else None, json=None if get else params, headers=headers,
                    timeout=ep.get("timeout_s", 180))
@@ -141,10 +142,10 @@ class LeadSpend:
     def __init__(self, treg):
         self.treg, self.micro = treg, 0
 
-    def call(self, capability, params=None):
+    def call(self, capability, params=None, max_cost=None):
         charged = []
         try:
-            return self.treg.call(capability, params, tally=charged)
+            return self.treg.call(capability, params, tally=charged, max_cost=max_cost)
         finally:
             self.micro += sum(charged)
 

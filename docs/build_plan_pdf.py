@@ -350,7 +350,7 @@ MODULES = [
          done="&quot;HR&quot; + tech + Texas returns the requested number of unique people, with company website for 90%+."),
 
     dict(id="M10", title="Profile Check & Fallback Lookup", tag="PHASE 3 · P0", pri="P0",
-         state="Does not exist",
+         state="Done (Nov 4): domain 20/20 people, 18/20 X-ray; drops logged",
          goal="Make sure every person really matches (current title, requested state) and has a company domain for the "
               "email finder. People-search rows already carry company name, website, size and industry, so paid "
               "lookups are only needed for X-ray rows and missing domains.",
@@ -362,8 +362,9 @@ MODULES = [
          how=["Filters: the current title matches a title variant; the address is in the requested state (state name, "
               f"code, or a city / metro from {c('data/us_cities.csv')}, e.g. &quot;Dallas-Fort Worth&quot;). Each rejection "
               "is logged with its reason.",
-              f"Domain = host of {c('lastCompanyWebsite')} without www. Missing: one {c('treg.companies.search')} call by "
-              "company name (~$0.0002), else leave empty and skip tier-2 email lookups.",
+              f"Domain = host of {c('lastCompanyWebsite')} without www. Missing: the company's LinkedIn page via "
+              f"{c('blitzapi.companies.linkedin-to-domain')} ($0.000495, misses free), then one "
+              f"{c('treg.companies.search')} by name (leadocean, ~$0); only a row whose name matches is used.",
               f"X-ray rows: {c('treg.people.enrich')} with the profile URL ($0.000495) for name, title, company and "
               "location, then the same filters.",
               f"Map icypeas fields: {c('firstname, lastname, headline, lastJobTitle, address, profileUrl, lastCompanyName, lastCompanyUrl, lastCompanyWebsite, lastCompanySize, lastCompanyIndustry')} "

@@ -56,6 +56,24 @@ def test_budget_stops_before_overshoot():
     raise AssertionError("expected BudgetReached")
 
 
+def test_max_cost_override_tightens_reservation_and_header():
+    seen = {}
+
+    def handler(req):
+        seen["cap"] = req.headers["X-Treg-Route-Max-Cost"]
+        return reply(cost=7600)
+    t = treg(handler, budget=0.05)  # people_search's own cap ($0.08) alone would exceed this budget
+    try:
+        t.call("people_search", {})
+        raise AssertionError("expected BudgetReached")
+    except BudgetReached:
+        pass
+    t.call("people_search", {}, max_cost=0.0195)
+    assert seen["cap"] == "0.0195" and t.spent_micro == 7600
+    treg(handler, budget=1.0).call("people_search", {}, max_cost=5.0)  # an override only tightens, never loosens
+    assert seen["cap"] == "0.08"
+
+
 def test_parallel_calls_never_overshoot_budget():
     import threading
     import time as _time
