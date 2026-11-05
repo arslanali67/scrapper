@@ -398,7 +398,7 @@ def test_junk_emails_are_never_leads():  # M15
 
 def test_suppression_list():  # M14
     from pathlib import Path
-    from common import COMPANY_COLUMNS, LeadWriter, Suppression, suppression
+    from common import COMPANY_COLUMNS, LeadWriter, Suppression, load_suppression
     f = Path(tempfile.mkdtemp()) / "suppress.txt"
     f.write_text("# opted out\nAcme.com\nhttps://www.Beta.io/contact\n@gamma.org\nJo@Delta.com  # asked 2026-11-01\n\n")
     s = Suppression(f)
@@ -418,7 +418,7 @@ def test_suppression_list():  # M14
     assert "acme" not in text.lower() and "jo@delta.com" not in text and (w.suppressed, w.emails_removed) == (1, 1)
     assert "leads dropped 1, emails removed 1" in s.summary(w) and Suppression().summary(w) == ""
     try:
-        suppression(str(f) + ".missing")
+        load_suppression(str(f) + ".missing")
         raise AssertionError("expected SystemExit")
     except SystemExit as e:
         assert "not found" in str(e)

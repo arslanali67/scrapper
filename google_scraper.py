@@ -17,7 +17,7 @@ from pathlib import Path
 
 from common import (ENDPOINTS, GOOGLE_COLUMNS, LeadSpend, LeadWriter, StopRun, Treg, TregError, cities_of, crawl_site,
                     domain_of, enrich_calls, enrich_paid, estimate, normalize_phone, require, state_code, states,
-                    suppression, zip_state, zips_of)
+                    load_suppression, zip_state, zips_of)
 
 require("maps_search", "web_extract", "company_emails_by_domain", "email_verify")
 
@@ -152,7 +152,7 @@ def main(argv=None):
     if Path(a.out).exists() and Path(a.out).stat().st_size and not a.resume:
         sys.exit(f"{a.out} already exists: add --resume to continue it, or choose another --out")
 
-    sup = suppression(a.suppress)
+    sup = load_suppression(a.suppress)
     treg = Treg(a.max_cost)
     stats, site_errors, area = Counter(), Counter(), Counter()
     stop, cache, taken = "", {}, set()

@@ -373,7 +373,7 @@ class Suppression:
                 f"emails removed {writer.emails_removed}")
 
 
-def suppression(path):
+def load_suppression(path):
     """--suppress value -> Suppression; with no flag, suppress.txt in the current folder is used when it exists."""
     if path and not Path(path).is_file():
         raise SystemExit(f"--suppress {path} not found")

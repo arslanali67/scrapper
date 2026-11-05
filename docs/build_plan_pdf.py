@@ -483,7 +483,7 @@ MODULES = [
          done="A domain in suppress.txt never appears in any output CSV."),
 
     dict(id="M15", title="Testing & README", tag="CROSS-CUTTING · P1", pri="P1",
-         state="Built (Nov 4): 57 checks, X-A1 in Excel; awaiting sign-off",
+         state="Done (Nov 4): 57 checks, X-A1 in Excel, owner signed off",
          goal="One small test file for the logic that can silently go wrong, real acceptance runs for each scraper, "
               "and a README so the tool can be used without this document.",
          used_by="Both scrapers",
@@ -513,7 +513,7 @@ MODULES = [
          done="All checks pass and the owner signs off on one real CSV from each scraper."),
 
     dict(id="M16", title="Graphify Architecture Update", tag="FINAL", pri="Final",
-         state="Do last, after implementation",
+         state="Done (Nov 5): 420 nodes, 14 communities, graph matches code",
          goal="Update the project's knowledge graph so it shows the real, final architecture, only after the scrapers "
               "are built and working.",
          used_by="Project documentation",

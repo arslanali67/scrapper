@@ -25,7 +25,7 @@ from pathlib import Path
 
 from common import (COMPANY_COLUMNS, ENDPOINTS, PEOPLE_COLUMNS, LeadSpend, LeadWriter, StopRun, Treg, TregError,
                     cities_of, crawl_site, domain_of, email_status, enrich_calls, enrich_paid, estimate,
-                    normalize_phone, require, state_code, states, suppression)
+                    normalize_phone, require, state_code, states, load_suppression)
 
 require("people_search", "people_count", "serp", "people_enrich", "company_domain_from_linkedin", "company_by_name",
         "email_find_person", "email_find_person_fallback", "email_verify", "phone_find_person", "companies_search",
@@ -600,7 +600,7 @@ def main(argv=None):
     if Path(out_path).exists() and Path(out_path).stat().st_size and not a.resume:
         sys.exit(f"{out_path} already exists: add --resume to continue it, or choose another --out")
 
-    sup = suppression(a.suppress)
+    sup = load_suppression(a.suppress)
     treg, what, ctrl_c = Treg(a.max_cost), "companies" if company else "people", "stopped with Ctrl+C"
     _, st = location_filter(a.location)
     contact = None if a.no_enrich else dict(fallback=not a.no_fallback, verify=a.verify, phone=a.phone)
