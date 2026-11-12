@@ -24,6 +24,21 @@ python -m venv .venv
 
 On Windows, use `.venv/Scripts/python -X utf8` instead of `python` so names with accents print correctly.
 
+## Web page (no command line needed)
+
+```bash
+.venv/Scripts/python -X utf8 app.py
+```
+
+Then open http://127.0.0.1:8765. Pick **Google businesses**, **LinkedIn people** or **LinkedIn companies** and fill
+in the form. **Estimate cost** is free and shows how many leads match and what the run would cost. **Start
+scraping** runs it with live progress; when it ends, **Download CSV** gives the file and a preview shows the first
+rows. CSVs are kept in `outputs/` (git-ignored) and listed under "Earlier results". **Stop** ends a run early; rows
+already written stay in the CSV.
+
+The page runs the same scrapers with the same budget limit, checks and `suppress.txt` as the commands below. It
+handles one run at a time, and only this computer can open it.
+
 ## Google scraper
 
 ```bash
@@ -189,6 +204,10 @@ python test_google.py
 
 ```bash
 python test_linkedin.py
+```
+
+```bash
+python test_app.py
 ```
 
 The acceptance runs against real treg endpoints (G-A1 to G-A4, L-A1 to L-A4, X-A1) and their results are recorded
